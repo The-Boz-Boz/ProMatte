@@ -302,6 +302,87 @@ TEST_CASE("static frames reuse the previous matte without running the model")
 	w.stop();
 }
 
+TEST_CASE("waitForMatte without a running model returns at once")
+{
+	InferenceWorker w;
+	// Never started: nothing will ever process the frame.
+	auto t0 = std::chrono::steady_clock::now();
+	CHECK(w.waitForMatte(1, 5000.0) == MatteWait::Aborted);
+	w.start();
+	w.setConfig(WorkerConfig{}); // no model
+	REQUIRE(waitFor([&] { return w.status().state == WorkerState::NoModel; }, 2000));
+	FrameBuffer f;
+	fillFrame(f, 64, 64, 100);
+	const uint64_t seq = w.submitFrame(f);
+	CHECK(seq > 0);
+	const MatteWait r = w.waitForMatte(seq, 5000.0);
+	CHECK((r == MatteWait::Aborted || r == MatteWait::NoMatte));
+	w.stop();
+	CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(4));
+}
+
+TEST_CASE("synchronous matte: the matte returned belongs to the submitted frame")
+{
+	ModelDescriptor model;
+	std::string path;
+	if (!loadModel(model, path, "rvm_mobilenetv3")) {
+		MESSAGE("RVM model not downloaded; skipping");
+		return;
+	}
+	InferenceWorker w;
+	w.setMotionSkip(true, 1.5f, 60000.0);
+	w.start();
+	WorkerConfig cfg;
+	cfg.model = model;
+	cfg.modelPath = path;
+	cfg.backend.kind = BackendKind::CPU;
+	cfg.backend.cpuThreads = 2;
+	cfg.sourceWidth = 320;
+	cfg.sourceHeight = 180;
+	w.setConfig(cfg);
+	REQUIRE(waitFor([&] { return w.status().state == WorkerState::Running; }, 15000));
+	uint32_t aw = 0, ah = 0;
+	w.desiredResolution(aw, ah);
+	FrameBuffer f;
+	MatteBuffer m;
+
+	// Several frames in a row, each waited for: every matte carries its frame's seq.
+	for (int i = 0; i < 4; ++i) {
+		REQUIRE(waitFor([&] { return w.wantsFrame(); }, 10000));
+		fillFrame(f, aw, ah, uint8_t(60 + i * 40));
+		const uint64_t seq = w.submitFrame(f);
+		REQUIRE(w.waitForMatte(seq, 20000.0) == MatteWait::Ready);
+		REQUIRE(w.takeMatte(m));
+		CHECK(m.seq == seq);
+	}
+
+	// Identical frame: static-scene skip, reported as Reused; no new matte.
+	REQUIRE(waitFor([&] { return w.wantsFrame(); }, 10000));
+	fillFrame(f, aw, ah, uint8_t(60 + 3 * 40));
+	uint64_t seq = w.submitFrame(f);
+	CHECK(w.waitForMatte(seq, 20000.0) == MatteWait::Reused);
+	CHECK_FALSE(w.takeMatte(m));
+
+	// Zero timeout on a frame that needs the model: Timeout, then it completes.
+	REQUIRE(waitFor([&] { return w.wantsFrame(); }, 10000));
+	fillFrame(f, aw, ah, 10);
+	seq = w.submitFrame(f);
+	CHECK(w.waitForMatte(seq, 0.0) == MatteWait::Timeout);
+	CHECK(w.waitForMatte(seq, 20000.0) == MatteWait::Ready);
+	REQUIRE(w.takeMatte(m));
+	CHECK(m.seq == seq);
+
+	// stop() releases a waiter that would otherwise wait for its full timeout.
+	MatteWait result = MatteWait::Ready;
+	std::thread waiter([&] { result = w.waitForMatte(seq + 1000, 30000.0); });
+	std::this_thread::sleep_for(std::chrono::milliseconds(50));
+	const auto t0 = std::chrono::steady_clock::now();
+	w.stop();
+	waiter.join();
+	CHECK(result == MatteWait::Aborted);
+	CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(5));
+}
+
 TEST_CASE("symbolic batch_size dimension is detected before session creation")
 {
 	ModelDescriptor m;

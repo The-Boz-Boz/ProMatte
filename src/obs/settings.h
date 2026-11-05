@@ -38,6 +38,8 @@ constexpr const char *MaxAiFps = "max_ai_fps";
 constexpr const char *MotionSkip = "motion_skip";
 constexpr const char *MotionSkipThreshold = "motion_skip_threshold";
 constexpr const char *MotionSkipMaxStaleMs = "motion_skip_max_stale_ms";
+constexpr const char *SyncMatte = "sync_matte";
+constexpr const char *SyncMatteTimeoutMs = "sync_matte_timeout_ms";
 constexpr const char *Separation = "edge_separation";
 constexpr const char *Smoothness = "edge_smoothness";
 constexpr const char *Feather = "edge_feather";
@@ -80,6 +82,11 @@ struct FilterSettings {
 	bool motionSkip = true;
 	float motionSkipThreshold = 1.5f; // mean |luma delta| of a 64x36 thumbnail, 0..255 levels
 	int motionSkipMaxStaleMs = 250;   // run the model at least this often anyway
+	// Synchronous matte: the render thread waits for the matte of the frame it is
+	// drawing (bounded by syncMatteTimeoutMs and 90% of the frame interval)
+	// instead of drawing the newest matte of an older frame.
+	bool syncMatte = true;
+	int syncMatteTimeoutMs = 45;
 
 	float separation = 0.5f;    // matte threshold
 	float smoothness = 0.35f;   // 0..1 -> softness band

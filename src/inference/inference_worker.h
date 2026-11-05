@@ -18,6 +18,15 @@ namespace promatte {
 
 enum class WorkerState { Stopped, Idle, Initializing, Running, Error, NoModel };
 
+// Outcome of InferenceWorker::waitForMatte().
+enum class MatteWait {
+	Ready,    // a matte for the frame (or a newer one) has been published
+	Reused,   // the frame was a static-scene skip: the previous matte stays valid
+	NoMatte,  // the frame was processed or dropped without a matte (error, disabled, no backend)
+	Timeout,  // the frame is still queued or being processed
+	Aborted,  // the worker is stopping or not Running
+};
+
 struct WorkerConfig {
 	BackendConfig backend;
 	ModelDescriptor model;
@@ -66,9 +75,11 @@ struct WorkerStatus {
 //   render thread ---submitFrame()---> [slot] ---> worker: preprocess, model,
 //   refine, temporal ---> [matte slot] ---takeMatte()---> render thread
 //
-// The render thread never blocks: submitting overwrites an unread frame (counted
-// as a drop), taking a matte only swaps buffers. Backend initialisation, model
-// loading and resolution changes all happen on the worker thread.
+// By default the render thread never blocks: submitting overwrites an unread frame
+// (counted as a drop), taking a matte only swaps buffers. In the synchronous mode
+// the render thread additionally waits (bounded) for the matte of the frame it
+// just submitted (waitForMatte). Backend initialisation, model loading and
+// resolution changes all happen on the worker thread.
 class InferenceWorker {
 public:
 	InferenceWorker();
@@ -107,7 +118,12 @@ public:
 	// dispatches) for frames nobody will process.
 	bool wantsFrame() const;
 	// Hands a frame to the worker; `frame` receives the previous slot buffer for reuse.
-	void submitFrame(FrameBuffer &frame);
+	// Returns the sequence number assigned to the submitted frame.
+	uint64_t submitFrame(FrameBuffer &frame);
+	// Blocks until the frame `seq` has been handled by the worker or `timeoutMs`
+	// elapses. Returns early (Aborted) when the worker stops or leaves Running.
+	// Never spins: waits on a condition variable signalled by the worker.
+	MatteWait waitForMatte(uint64_t seq, double timeoutMs);
 	// Swaps in the newest matte if it is newer than `out.seq`. Returns true if updated.
 	bool takeMatte(MatteBuffer &out);
 	bool hasMatte() const { return matteAvailable_.load(); }
@@ -159,6 +175,10 @@ private:
 	void logSkipStats(double nowMs);
 	void reportCost(bool force);
 	void setState(WorkerState s, const std::string &error = {});
+	// Records that frame `seq` left the worker (processed, skipped or dropped) and
+	// wakes waitForMatte().
+	void markFrameDone(uint64_t seq, MatteWait outcome);
+	void wakeMatteWaiters();
 
 	// thread + control
 	std::thread thread_;
@@ -191,6 +211,15 @@ private:
 	mutable std::mutex matteMutex_;
 	MatteBuffer matteSlot_;
 	std::atomic<bool> matteAvailable_{false};
+	// Synchronous mode bookkeeping, guarded by matteMutex_.
+	std::condition_variable matteCv_;
+	uint64_t publishedSeq_ = 0; // seq of the newest published matte
+	uint64_t doneSeq_ = 0;      // newest seq the worker finished with (any outcome)
+	MatteWait doneOutcome_ = MatteWait::NoMatte;
+	// Mirror of status_.state readable without statusMutex_.
+	std::atomic<WorkerState> stateFast_{WorkerState::Stopped};
+	// Outcome of the last processOne() (worker thread only).
+	MatteWait lastOutcome_ = MatteWait::NoMatte;
 
 	// worker-owned state
 	WorkerConfig config_;

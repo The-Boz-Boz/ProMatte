@@ -137,6 +137,8 @@ void settingsDefaults(obs_data_t *d)
 	obs_data_set_default_bool(d, keys::MotionSkip, true);
 	obs_data_set_default_double(d, keys::MotionSkipThreshold, 1.5);
 	obs_data_set_default_int(d, keys::MotionSkipMaxStaleMs, 250);
+	obs_data_set_default_bool(d, keys::SyncMatte, true);
+	obs_data_set_default_int(d, keys::SyncMatteTimeoutMs, 45);
 	obs_data_set_default_double(d, keys::Separation, 0.5);
 	obs_data_set_default_double(d, keys::Smoothness, 0.35);
 	obs_data_set_default_double(d, keys::Feather, 0.25);
@@ -179,6 +181,8 @@ FilterSettings settingsLoad(obs_data_t *d)
 	s.motionSkip = obs_data_get_bool(d, keys::MotionSkip);
 	s.motionSkipThreshold = float(std::clamp(obs_data_get_double(d, keys::MotionSkipThreshold), 0.0, 20.0));
 	s.motionSkipMaxStaleMs = int(std::clamp<long long>(obs_data_get_int(d, keys::MotionSkipMaxStaleMs), 0, 2000));
+	s.syncMatte = obs_data_get_bool(d, keys::SyncMatte);
+	s.syncMatteTimeoutMs = int(std::clamp<long long>(obs_data_get_int(d, keys::SyncMatteTimeoutMs), 1, 200));
 	s.separation = float(std::clamp(obs_data_get_double(d, keys::Separation), 0.05, 0.95));
 	s.smoothness = clamp01(obs_data_get_double(d, keys::Smoothness));
 	s.feather = clamp01(obs_data_get_double(d, keys::Feather));

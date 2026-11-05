@@ -43,6 +43,18 @@ struct FilterContext {
 	bool downloadWasActive = false; // a Model manager download was running at the last check
 	std::atomic<bool> workerEnabled{true};
 	bool bypassLogged = false;
+	// Synchronous-matte statistics (graphics thread only), logged every 60 s.
+	struct SyncStats {
+		uint64_t windowStartNs = 0;
+		unsigned long long frames = 0;   // first renders of a frame with sync on
+		unsigned long long waited = 0;   // frames handed to the worker and waited for
+		unsigned long long synced = 0;   // composited with the matte of the same frame
+		unsigned long long reused = 0;   // static-scene skip: previous matte kept
+		unsigned long long timeouts = 0; // composited with an older matte
+		unsigned long long other = 0;    // no matte (error, aborted, dropped)
+		double waitSumMs = 0;
+		double waitMaxMs = 0;
+	} sync;
 	std::string resolvedModelId; // model actually configured on the worker
 	std::string configuredBackend;
 	std::string renderAdapterName; // GPU OBS renders on (gs_get_device_name)

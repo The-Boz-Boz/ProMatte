@@ -435,6 +435,52 @@ void updateOverlay(FilterContext *ctx, uint32_t w, uint32_t h)
 	ctx->overlay.setText(text);
 }
 
+// Synchronous matte: waits (bounded) for the matte of frame `seq` (0 = nothing
+// was submitted this frame) and keeps the statistics logged once a minute.
+void syncMatteWait(FilterContext *ctx, uint64_t seq, int timeoutSettingMs)
+{
+	FilterContext::SyncStats &st = ctx->sync;
+	const uint64_t now = os_gettime_ns();
+	if (!st.windowStartNs)
+		st.windowStartNs = now;
+	++st.frames;
+	if (seq) {
+		const double fps = ctx->lastFps > 1 ? ctx->lastFps : sourceFps();
+		const double timeoutMs = std::min(double(timeoutSettingMs), 0.9 * 1000.0 / fps);
+		Stopwatch sw;
+		const MatteWait r = ctx->worker->waitForMatte(seq, timeoutMs);
+		const double waitedMs = sw.elapsedMs();
+		++st.waited;
+		st.waitSumMs += waitedMs;
+		st.waitMaxMs = std::max(st.waitMaxMs, waitedMs);
+		switch (r) {
+		case MatteWait::Ready:
+			++st.synced;
+			break;
+		case MatteWait::Reused:
+			++st.reused;
+			break;
+		case MatteWait::Timeout:
+			++st.timeouts;
+			break;
+		case MatteWait::NoMatte:
+		case MatteWait::Aborted:
+			++st.other;
+			break;
+		}
+	}
+	if (now - st.windowStartNs >= 60000000000ULL) {
+		if (st.frames > 0)
+			PM_LOG_INFO("sync matte: %llu frames, %llu waited: %llu in sync (%.0f%% of frames), %llu static reuse, "
+				    "%llu timeouts, %llu without matte; wait avg %.1f ms, max %.1f ms",
+				    st.frames, st.waited, st.synced, 100.0 * double(st.synced) / double(st.frames),
+				    st.reused, st.timeouts, st.other,
+				    st.waited ? st.waitSumMs / double(st.waited) : 0.0, st.waitMaxMs);
+		st = FilterContext::SyncStats{};
+		st.windowStartNs = now;
+	}
+}
+
 void filterRenderImpl(void *data)
 {
 	auto *ctx = static_cast<FilterContext *>(data);
@@ -498,17 +544,36 @@ void filterRenderImpl(void *data)
 		obs_source_process_filter_end(ctx->source, obs_get_base_effect(OBS_EFFECT_DEFAULT), w, h);
 	ctx->gpu.captureEnd();
 
-	// 2. Feed the inference worker (never blocks).
+	// 2. Feed the inference worker.
 	//    The downscale + stage is an asynchronous GPU copy and runs every frame so
 	//    the staged frame stays fresh. The readback (gs_stagesurface_map) is a GPU
 	//    sync point that can queue behind long inference dispatches, so it only
 	//    happens when the worker is actually ready to take a frame.
+	//
+	//    Asynchronous mode (sync off): the frame read back is the one staged on
+	//    the previous render, and its matte is drawn on a later frame (never
+	//    blocks, but the matte trails the video by about two frames).
+	//    Synchronous mode: stage this frame, read it back at once (the map waits
+	//    for the copy), hand it to the worker and wait - bounded - for its matte,
+	//    so the matte is composited onto the frame it was computed from.
 	uint32_t aiW = 0, aiH = 0;
 	ctx->worker->desiredResolution(aiW, aiH);
 	if (firstRenderOfFrame && aiW && aiH && ctx->workerEnabled.load()) {
-		if (ctx->worker->wantsFrame() && ctx->gpu.readbackFrame(ctx->frame))
-			ctx->worker->submitFrame(ctx->frame);
-		ctx->gpu.stageFrame(aiW, aiH);
+		if (s.syncMatte) {
+			ctx->gpu.stageFrame(aiW, aiH);
+			const bool running = workerState == WorkerState::Running;
+			uint64_t seq = 0;
+			// wantsFrame() is false while maxAiFps throttles or an earlier frame
+			// still sits unread in the slot: then nothing is fed and nothing is
+			// waited for (the newest available matte is drawn, as in async mode).
+			if (running && ctx->worker->wantsFrame() && ctx->gpu.readbackFrame(ctx->frame))
+				seq = ctx->worker->submitFrame(ctx->frame);
+			syncMatteWait(ctx, seq, s.syncMatteTimeoutMs);
+		} else {
+			if (ctx->worker->wantsFrame() && ctx->gpu.readbackFrame(ctx->frame))
+				ctx->worker->submitFrame(ctx->frame);
+			ctx->gpu.stageFrame(aiW, aiH);
+		}
 	}
 
 	// 3. Pick up the newest matte.

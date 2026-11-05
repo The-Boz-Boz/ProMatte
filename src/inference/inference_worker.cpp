@@ -71,6 +71,7 @@ void InferenceWorker::start()
 void InferenceWorker::stop()
 {
 	stopping_ = true; // a backend still initialising on the worker is not installed
+	wakeMatteWaiters(); // a render thread in waitForMatte() returns Aborted
 	if (!running_.exchange(false)) {
 		if (thread_.joinable())
 			thread_.join();
@@ -91,9 +92,64 @@ void InferenceWorker::stop()
 
 void InferenceWorker::setState(WorkerState s, const std::string &error)
 {
-	std::lock_guard<std::mutex> lock(statusMutex_);
-	status_.state = s;
-	status_.error = error;
+	{
+		std::lock_guard<std::mutex> lock(statusMutex_);
+		status_.state = s;
+		status_.error = error;
+	}
+	stateFast_ = s;
+	if (s != WorkerState::Running)
+		wakeMatteWaiters();
+}
+
+void InferenceWorker::wakeMatteWaiters()
+{
+	// Taking the mutex orders the state change before a waiter's predicate check,
+	// so the notification cannot fall between its check and its wait.
+	{
+		std::lock_guard<std::mutex> lock(matteMutex_);
+	}
+	matteCv_.notify_all();
+}
+
+void InferenceWorker::markFrameDone(uint64_t seq, MatteWait outcome)
+{
+	if (seq == 0)
+		return;
+	{
+		std::lock_guard<std::mutex> lock(matteMutex_);
+		if (seq >= doneSeq_) {
+			doneSeq_ = seq;
+			doneOutcome_ = outcome;
+		}
+	}
+	matteCv_.notify_all();
+}
+
+MatteWait InferenceWorker::waitForMatte(uint64_t seq, double timeoutMs)
+{
+	const auto deadline = std::chrono::steady_clock::now() +
+			      std::chrono::microseconds(int64_t(std::max(timeoutMs, 0.0) * 1000.0));
+	std::unique_lock<std::mutex> lock(matteMutex_);
+	MatteWait result = MatteWait::Timeout;
+	auto ready = [&] {
+		if (publishedSeq_ >= seq) {
+			result = MatteWait::Ready;
+			return true;
+		}
+		if (doneSeq_ >= seq) {
+			result = doneSeq_ == seq ? doneOutcome_ : MatteWait::NoMatte;
+			return true;
+		}
+		if (stopping_.load() || !running_.load() || stateFast_.load() != WorkerState::Running) {
+			result = MatteWait::Aborted;
+			return true;
+		}
+		return false;
+	};
+	if (!matteCv_.wait_until(lock, deadline, ready))
+		return MatteWait::Timeout;
+	return result;
 }
 
 void InferenceWorker::setConfig(const WorkerConfig &config)
@@ -195,20 +251,34 @@ bool InferenceWorker::wantsFrame() const
 	return !frameAvailable_;
 }
 
-void InferenceWorker::submitFrame(FrameBuffer &frame)
+uint64_t InferenceWorker::submitFrame(FrameBuffer &frame)
 {
 	bool overwrote = false;
+	uint64_t seq = 0, overwrittenSeq = 0;
 	{
 		std::lock_guard<std::mutex> lock(frameMutex_);
 		overwrote = frameAvailable_;
-		frame.seq = nextSeq_++;
+		if (overwrote)
+			overwrittenSeq = frameSlot_.seq;
+		seq = nextSeq_++;
+		frame.seq = seq;
 		frame.timestampMs = Stopwatch::nowMs();
 		std::swap(frame, frameSlot_); // caller gets the old buffer back (no allocation churn)
 		frameAvailable_ = true;
 	}
+	if (overwrote)
+		markFrameDone(overwrittenSeq, MatteWait::NoMatte);
 	perf_.recordSubmit(overwrote);
 	perf_.recordQueueDepth(1);
+	// The worker checks for a frame under ctrlMutex_ before it sleeps on cv_.
+	// Taking that mutex here means it either sees the frame or is already
+	// waiting, so the notification wakes it at once instead of after the 50 ms
+	// idle timeout (which the synchronous mode would pay on every frame).
+	{
+		std::lock_guard<std::mutex> lock(ctrlMutex_);
+	}
 	cv_.notify_one();
+	return seq;
 }
 
 bool InferenceWorker::takeMatte(MatteBuffer &out)
@@ -439,6 +509,7 @@ void InferenceWorker::threadMain()
 #endif
 	PM_LOG_DEBUG("inference worker thread started");
 	while (running_) {
+		uint64_t inFlightSeq = 0, droppedSeq = 0;
 		try {
 			// ---- control messages ------------------------------------------------
 			bool haveConfig = false, haveTuning = false, haveSource = false, haveQuality = false, doRelease = false,
@@ -637,20 +708,28 @@ void InferenceWorker::threadMain()
 					if (enabled_ && backend_) {
 						std::swap(work_, frameSlot_);
 						got = true;
+					} else {
+						droppedSeq = frameSlot_.seq;
 					}
 					frameAvailable_ = false; // drop when disabled / no backend
 				}
 			}
 			perf_.recordQueueDepth(0);
-			if (!got)
-				continue;
-			// Throttling happens in wantsFrame(): a frame that was read back is processed.
-			processOne(work_);
+			if (got) {
+				inFlightSeq = work_.seq;
+				lastOutcome_ = MatteWait::NoMatte; // stays so if processOne throws
+				// Throttling happens in wantsFrame(): a frame that was read back is processed.
+				processOne(work_);
+			}
 		} catch (const std::exception &e) {
 			handleWorkerException(e.what());
 		} catch (...) {
 			handleWorkerException("unknown exception");
 		}
+		// Every frame taken from the slot is reported, whatever happened to it,
+		// so a render thread waiting for it in waitForMatte() returns promptly.
+		markFrameDone(droppedSeq, MatteWait::NoMatte);
+		markFrameDone(inFlightSeq, lastOutcome_);
 	}
 	replaceBackend(nullptr);
 	PM_LOG_DEBUG("inference worker thread exiting");
@@ -793,6 +872,7 @@ void InferenceWorker::processOne(FrameBuffer &frame)
 	const double startMs = Stopwatch::nowMs();
 	if (isStaticFrame(pixels, w, h, stride, startMs)) {
 		logSkipStats(startMs);
+		lastOutcome_ = MatteWait::Reused;
 		return;
 	}
 
@@ -892,7 +972,9 @@ void InferenceWorker::processOne(FrameBuffer &frame)
 		std::lock_guard<std::mutex> lock(matteMutex_);
 		std::swap(matteSlot_, matteWork_);
 		matteAvailable_ = true;
+		publishedSeq_ = std::max(publishedSeq_, matteSlot_.seq);
 	}
+	lastOutcome_ = MatteWait::Ready; // waiters are woken by markFrameDone() in the loop
 	if (settleFrames_ > 0) {
 		--settleFrames_;
 		perf_.recordSettlingInference();

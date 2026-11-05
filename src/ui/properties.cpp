@@ -429,6 +429,8 @@ obs_properties_t *buildProperties(void *data)
 	obs_properties_add_bool(a, keys::MotionSkip, T("MotionSkip"));
 	obs_properties_add_float_slider(a, keys::MotionSkipThreshold, T("MotionSkipThreshold"), 0.0, 10.0, 0.1);
 	obs_properties_add_int(a, keys::MotionSkipMaxStaleMs, T("MotionSkipMaxStaleMs"), 0, 2000, 10);
+	obs_properties_add_bool(a, keys::SyncMatte, T("SyncMatte"));
+	obs_properties_add_int(a, keys::SyncMatteTimeoutMs, T("SyncMatteTimeoutMs"), 1, 200, 1);
 	obs_properties_add_group(props, "group_advanced", T("Group.Advanced"), OBS_GROUP_NORMAL, a);
 
 	obs_properties_add_text(props, "privacy_note", T("Privacy"), OBS_TEXT_INFO);
