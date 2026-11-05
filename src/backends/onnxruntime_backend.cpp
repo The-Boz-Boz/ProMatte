@@ -387,6 +387,9 @@ bool OnnxRuntimeBackend::initialize(const BackendConfig &config, const ModelDesc
 		case BackendKind::Auto:
 			so.SetIntraOpNumThreads(threads);
 			so.SetInterOpNumThreads(1);
+			// Idle intra-op threads sleep instead of spinning between frames: the
+			// worker runs a few inferences per second next to OBS' own threads.
+			so.AddConfigEntry("session.intra_op.allow_spinning", "0");
 			caps_.deviceName = sysinfo::cpuName() + " (" + std::to_string(threads) + " threads)";
 			caps_.isGpu = false;
 			break;

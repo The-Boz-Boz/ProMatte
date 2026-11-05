@@ -12,6 +12,11 @@ struct TemporalParams {
 	float recurrentScale = 0.5f;
 };
 
+// 1 - (1 - k)^frames: the blend factor `k` compounded over `frames` frame
+// intervals (frame-time compensation). float exp2/log2 instead of double pow;
+// k is clamped to [0, 1].
+float blendForFrames(float k, float frames);
+
 // Motion-adaptive temporal smoothing of the matte at AI resolution.
 //
 //   motion(x)  = blur(|luma_t - luma_t-1|)               (per-pixel, 5x5 box)

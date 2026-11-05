@@ -6,6 +6,15 @@
 
 namespace promatte {
 
+float blendForFrames(float k, float frames)
+{
+	if (k >= 1.f)
+		return 1.f; // log2(0) would be -inf
+	if (k <= 0.f)
+		return 0.f;
+	return 1.f - std::exp2(frames * std::log2(1.f - k));
+}
+
 void TemporalStabilizer::reset()
 {
 	hasHistory_ = false;
@@ -92,6 +101,7 @@ void TemporalStabilizer::process(float *alpha, const uint8_t *luma, uint32_t w, 
 
 	// Frame-time compensation: if frames were skipped, converge proportionally faster.
 	const double frames = std::clamp(dtMs / 33.333, 1.0, 8.0);
+	const float framesF = float(frames);
 
 	for (size_t i = 0; i < n; ++i) {
 		float m = std::clamp((motion_[i] - motionLo) * invRange, 0.f, 1.f);
@@ -106,7 +116,7 @@ void TemporalStabilizer::process(float *alpha, const uint8_t *luma, uint32_t w, 
 		else if (diff > 0.35f)
 			k = std::max(k, 0.4f);
 		if (frames > 1.0)
-			k = 1.f - float(std::pow(1.0 - k, frames));
+			k = blendForFrames(k, framesF);
 		float out = prev + k * (cur - prev);
 		alpha[i] = out;
 		prevAlpha_[i] = out;

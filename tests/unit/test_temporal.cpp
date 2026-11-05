@@ -1,5 +1,6 @@
 #include <doctest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <vector>
 
@@ -78,6 +79,23 @@ TEST_CASE("resolution change resets history without crashing")
 	ts.process(a2.data(), l2.data(), 8, 8, 33.3, false);
 	CHECK(a2[0] == doctest::Approx(0.9f)); // first frame at new size passes unchanged
 	CHECK(ts.hasHistory());
+}
+
+TEST_CASE("frame-time compensation matches the double pow formula")
+{
+	// The per-pixel blend used to be 1 - pow(1.0 - k, frames) in double.
+	const float framesGrid[] = {1.f, 1.01f, 1.5f, 2.f, 3.7f, 8.f};
+	float maxErr = 0.f;
+	for (float frames : framesGrid) {
+		for (int i = 0; i <= 1000; ++i) {
+			const float k = float(i) / 1000.f;
+			const float expected = 1.f - float(std::pow(1.0 - double(k), double(frames)));
+			maxErr = std::max(maxErr, std::abs(blendForFrames(k, frames) - expected));
+		}
+	}
+	CHECK(maxErr <= 1.f / 255.f);
+	CHECK(blendForFrames(1.f, 3.f) == 1.f);
+	CHECK(blendForFrames(0.f, 3.f) == 0.f);
 }
 
 TEST_CASE("disabled stabiliser passes input through")
