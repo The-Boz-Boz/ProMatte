@@ -926,7 +926,9 @@ void InferenceWorker::processOne(FrameBuffer &frame)
 
 	// Post-process: CPU refinement + temporal stabilisation at AI resolution.
 	sw.reset();
-	refiner_.process(output_.alpha.data(), w, h, config_.refine);
+	RefineParams refine = config_.refine;
+	refine.alphaMatting = m.isAlphaMatting();
+	refiner_.process(output_.alpha.data(), w, h, refine);
 	double dt = lastProcessedMs_ >= 0 ? frame.timestampMs - lastProcessedMs_ : 33.3;
 	temporal_.process(output_.alpha.data(), luma_.data(), w, h, dt, m.recurrent);
 	lastProcessedMs_ = frame.timestampMs;
