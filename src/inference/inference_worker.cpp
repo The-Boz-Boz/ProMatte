@@ -501,13 +501,27 @@ bool InferenceWorker::applyConfigLocked(WorkerConfig cfg, bool keepCurrentOnFail
 	return true;
 }
 
+void InferenceWorker::updateThreadPriority()
+{
+	const bool gpu = backend_ && backend_->capabilities().isGpu;
+	const int normal = threadPriorityNormal(syncMatte_.load(), gpu) ? 1 : 0;
+	if (normal == threadPriorityNormal_)
+		return;
+	threadPriorityNormal_ = normal;
+#ifdef _WIN32
+	// Below normal: OBS' render and encoder threads must win any contention for
+	// the CPU, on low-core machines a CPU-backend inference otherwise starves the
+	// compositor. Normal: in the synchronous mode the graphics thread itself
+	// waits for this thread, and a GPU backend needs little CPU time, so being
+	// preempted only adds latency to the frame OBS is blocked on.
+	SetThreadPriority(GetCurrentThread(), normal ? THREAD_PRIORITY_NORMAL : THREAD_PRIORITY_BELOW_NORMAL);
+#endif
+	PM_LOG_DEBUG("inference worker thread priority: %s", normal ? "normal" : "below normal");
+}
+
 void InferenceWorker::threadMain()
 {
-#ifdef _WIN32
-	// OBS' render and encoder threads must win any contention for the CPU: on
-	// low-core machines a CPU-backend inference otherwise starves the compositor.
-	SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
-#endif
+	updateThreadPriority(); // no backend yet: below normal
 	PM_LOG_DEBUG("inference worker thread started");
 	while (running_) {
 		uint64_t inFlightSeq = 0, droppedSeq = 0;
@@ -635,6 +649,8 @@ void InferenceWorker::threadMain()
 					updateAiResolution();
 				}
 			}
+			// Mode or backend may have changed (settings, CPU fallback, release).
+			updateThreadPriority();
 			if (doResetTemporal) {
 				temporal_.reset();
 				thumbRefValid_ = false;
