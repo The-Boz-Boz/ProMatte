@@ -196,6 +196,12 @@ WorkerStatus InferenceWorker::status() const
 	return status_;
 }
 
+WorkerState InferenceWorker::state() const
+{
+	std::lock_guard<std::mutex> lock(statusMutex_);
+	return status_.state;
+}
+
 PerfStats InferenceWorker::stats() const
 {
 	return perf_.snapshot();
@@ -230,12 +236,11 @@ void InferenceWorker::updateAiResolution()
 		    t.downsampleRatio, config_.sourceWidth, config_.sourceHeight);
 }
 
-bool InferenceWorker::initializeBackend(WorkerConfig &cfg, std::string &error)
+std::unique_ptr<SegmentationBackend> InferenceWorker::initializeBackend(const WorkerConfig &cfg, std::string &error)
 {
-	backend_.reset();
 	if (cfg.model.id.empty() || cfg.modelPath.empty()) {
 		error = "no model selected";
-		return false;
+		return nullptr;
 	}
 	BackendKind kind = cfg.backend.kind;
 	if (kind == BackendKind::Auto)
@@ -258,51 +263,76 @@ bool InferenceWorker::initializeBackend(WorkerConfig &cfg, std::string &error)
 		auto b = createBackend(k);
 		std::string err;
 		if (b->initialize(cfg.backend, cfg.model, cfg.modelPath, err)) {
-			backend_ = std::move(b);
 			if (k != kind)
 				PM_LOG_WARN("backend %s failed (%s); fell back to %s", backendKindName(kind), lastError.c_str(),
 					    backendKindName(k));
-			{
-				std::lock_guard<std::mutex> lock(statusMutex_);
-				status_.backend = backend_->capabilities();
-			}
-			return true;
+			return b;
 		}
 		lastError = err;
 		PM_LOG_WARN("backend %s init failed: %s", backendKindName(k), err.c_str());
 	}
 	error = lastError.empty() ? "no inference backend available" : lastError;
-	return false;
+	return nullptr;
 }
 
-bool InferenceWorker::applyConfigLocked(WorkerConfig cfg)
+void InferenceWorker::publishModel(const WorkerConfig &cfg, bool usingFallback)
+{
+	std::lock_guard<std::mutex> lock(statusMutex_);
+	status_.modelId = cfg.model.id;
+	status_.modelName = cfg.model.displayName;
+	status_.recurrent = cfg.model.recurrent;
+	status_.providesForeground = cfg.model.providesForeground;
+	status_.usingFallbackModel = usingFallback;
+	if (backend_)
+		status_.backend = backend_->capabilities();
+}
+
+bool InferenceWorker::applyConfigLocked(WorkerConfig cfg, bool keepCurrentOnFailure)
 {
 	// ctrlMutex_ is NOT held here (called from the worker thread after copying).
 	const bool needBackend = !backend_ || cfg.model.id != config_.model.id || cfg.modelPath != config_.modelPath ||
 				 cfg.backend.kind != config_.backend.kind ||
 				 cfg.backend.deviceIndex != config_.backend.deviceIndex ||
 				 cfg.backend.cpuThreads != config_.backend.cpuThreads;
-	config_ = cfg;
-	temporal_.setParams(cfg.temporal);
-	{
+	// Re-posting the model already in use (the owner refreshing fallback/upgrade
+	// candidates) keeps the fallback flag the worker set when it switched.
+	bool usingFallback = false;
+	if (backend_ && cfg.model.id == config_.model.id) {
 		std::lock_guard<std::mutex> lock(statusMutex_);
-		status_.modelId = cfg.model.id;
-		status_.modelName = cfg.model.displayName;
-		status_.recurrent = cfg.model.recurrent;
-		status_.providesForeground = cfg.model.providesForeground;
-		status_.usingFallbackModel = false;
+		usingFallback = status_.usingFallbackModel;
 	}
+	// A new configuration supersedes any pending error recovery.
+	consecutiveErrors_ = 0;
+	reinitDelayMs_ = 0;
+	reinitDueMs_ = -1;
 	if (needBackend) {
-		setState(WorkerState::Initializing);
-		std::string err;
-		if (!initializeBackend(config_, err)) {
+		if (!keepCurrentOnFailure) {
+			// Release the old session first so two models never occupy (V)RAM at once.
 			backend_.reset();
+			publishModel(cfg, false);
+			setState(WorkerState::Initializing);
+		}
+		std::string err;
+		std::unique_ptr<SegmentationBackend> fresh = initializeBackend(cfg, err);
+		if (!fresh) {
+			if (keepCurrentOnFailure && backend_) {
+				PM_LOG_WARN("could not switch to model '%s' (%s); keeping '%s'", cfg.model.id.c_str(),
+					    err.c_str(), config_.model.id.c_str());
+				return false;
+			}
+			backend_.reset();
+			config_ = cfg;
+			publishModel(cfg, false);
 			setState(cfg.modelPath.empty() ? WorkerState::NoModel : WorkerState::Error, err);
 			PM_LOG_ERROR("inference initialisation failed: %s", err.c_str());
 			aiW_ = aiH_ = 0;
 			return false;
 		}
+		backend_ = std::move(fresh);
 	}
+	config_ = cfg;
+	temporal_.setParams(cfg.temporal);
+	publishModel(cfg, usingFallback);
 	const bool gpu = backend_ && backend_->capabilities().isGpu;
 	perf_.configure(cfg.quality, int(cfg.model.tiers.size()), cfg.sourceFps, gpu);
 	tier_ = cfg.manualTier >= 0 ? std::clamp(cfg.manualTier, 0, int(cfg.model.tiers.size()) - 1)
@@ -386,6 +416,8 @@ void InferenceWorker::threadMain()
 			config_.model = ModelDescriptor{};
 			config_.modelPath.clear();
 			aiW_ = aiH_ = 0;
+			reinitDueMs_ = -1;
+			consecutiveErrors_ = 0;
 			setState(WorkerState::Idle);
 		}
 		if (haveConfig) {
@@ -407,6 +439,9 @@ void InferenceWorker::threadMain()
 			}
 			applyConfigLocked(cfg);
 		}
+		// Backend dropped after repeated inference errors: retry once the back-off expires.
+		if (!backend_ && reinitDueMs_ >= 0 && Stopwatch::nowMs() >= reinitDueMs_)
+			tryReinitialize();
 		if (haveTuning) {
 			config_.temporal = tp;
 			config_.refine = rp;
@@ -475,18 +510,20 @@ void InferenceWorker::threadMain()
 					cfg.fallbackModelPath.clear();
 					cfg.upgradeModel = ModelDescriptor{};
 					cfg.upgradeModelPath.clear();
-					applyConfigLocked(cfg);
-					{
-						std::lock_guard<std::mutex> lock(statusMutex_);
-						status_.usingFallbackModel = fallback;
+					// On failure the current model and backend stay in service.
+					if (applyConfigLocked(cfg, /*keepCurrentOnFailure=*/true)) {
+						{
+							std::lock_guard<std::mutex> lock(statusMutex_);
+							status_.usingFallbackModel = fallback;
+						}
+						ModelChangeObserver obs;
+						{
+							std::lock_guard<std::mutex> lock(observerMutex_);
+							obs = modelChangeObserver_;
+						}
+						if (obs)
+							obs(target.id);
 					}
-					ModelChangeObserver obs;
-					{
-						std::lock_guard<std::mutex> lock(observerMutex_);
-						obs = modelChangeObserver_;
-					}
-					if (obs)
-						obs(target.id);
 				}
 			}
 		}
@@ -528,6 +565,59 @@ void InferenceWorker::threadMain()
 	}
 	backend_.reset();
 	PM_LOG_DEBUG("inference worker thread exiting");
+}
+
+void InferenceWorker::handleInferenceError(const std::string &error)
+{
+	const double now = Stopwatch::nowMs();
+	// Count the failed attempt as processed so throttling and dt stay sane.
+	lastProcessedMs_ = now;
+	++consecutiveErrors_;
+	if (lastErrorLogMs_ < 0 || now - lastErrorLogMs_ >= kErrorLogIntervalMs) {
+		if (suppressedErrors_ > 0)
+			PM_LOG_ERROR("inference error: %s (%llu similar errors suppressed)", error.c_str(), suppressedErrors_);
+		else
+			PM_LOG_ERROR("inference error: %s", error.c_str());
+		lastErrorLogMs_ = now;
+		suppressedErrors_ = 0;
+	} else {
+		++suppressedErrors_;
+	}
+	if (consecutiveErrors_ < kErrorsBeforeReset)
+		return;
+	// The session is probably wedged (device removed, driver reset): drop it and
+	// rebuild it after a growing pause instead of failing every frame.
+	reinitDelayMs_ = reinitDelayMs_ <= 0 ? 1000.0 : std::min(reinitDelayMs_ * 2.0, kMaxReinitDelayMs);
+	reinitDueMs_ = now + reinitDelayMs_;
+	backend_.reset();
+	aiW_ = aiH_ = 0;
+	PM_LOG_WARN("%d inference errors in a row; backend released, re-initialising in %.0f s", consecutiveErrors_,
+		    reinitDelayMs_ / 1000.0);
+	consecutiveErrors_ = 0;
+	setState(WorkerState::Error, "inference failed repeatedly (" + error + "); retrying");
+}
+
+void InferenceWorker::tryReinitialize()
+{
+	reinitDueMs_ = -1;
+	std::string err;
+	std::unique_ptr<SegmentationBackend> fresh = initializeBackend(config_, err);
+	if (!fresh) {
+		reinitDelayMs_ = std::min(std::max(reinitDelayMs_, 1000.0) * 2.0, kMaxReinitDelayMs);
+		reinitDueMs_ = Stopwatch::nowMs() + reinitDelayMs_;
+		PM_LOG_ERROR("inference re-initialisation failed: %s; next attempt in %.0f s", err.c_str(),
+			     reinitDelayMs_ / 1000.0);
+		setState(WorkerState::Error, "re-initialisation failed: " + err);
+		return;
+	}
+	backend_ = std::move(fresh);
+	{
+		std::lock_guard<std::mutex> lock(statusMutex_);
+		status_.backend = backend_->capabilities();
+	}
+	PM_LOG_INFO("inference backend re-initialised (model '%s')", config_.model.id.c_str());
+	updateAiResolution();
+	setState(WorkerState::Running);
 }
 
 void InferenceWorker::reportCost(bool force)
@@ -602,13 +692,13 @@ void InferenceWorker::processOne(FrameBuffer &frame)
 	in.resetState = false;
 	std::string err;
 	if (!backend_->processFrame(in, output_, err)) {
-		if (running_) {
-			PM_LOG_ERROR("inference error: %s", err.c_str());
-			setState(WorkerState::Error, err);
-		}
+		if (running_)
+			handleInferenceError(err);
 		return;
 	}
 	const double infMs = sw.elapsedMs();
+	consecutiveErrors_ = 0;
+	reinitDelayMs_ = 0;
 
 	// Post-process: CPU refinement + temporal stabilisation at AI resolution.
 	sw.reset();

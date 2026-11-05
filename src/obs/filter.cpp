@@ -368,6 +368,20 @@ void filterRender(void *data, gs_effect_t *)
 		PM_LOG_INFO("source size %ux%u @ %.2f fps", w, h, ctx->lastFps);
 	}
 
+	// While the worker is loading, failed or has no model it produces no new
+	// mattes; drawing the last one would freeze the cut-out over live video.
+	// Unless a fresh matte is already waiting, show the source untouched and skip
+	// the full-resolution capture.
+	const WorkerState workerState = ctx->worker->state();
+	if ((workerState == WorkerState::Error || workerState == WorkerState::Initializing ||
+	     workerState == WorkerState::NoModel) &&
+	    !ctx->worker->hasMatte()) {
+		if (ctx->gpu.hasMatte())
+			ctx->gpu.dropMatte();
+		passthrough();
+		return;
+	}
+
 	// 1. Capture the source into our texture.
 	if (!ctx->gpu.captureBegin(w, h)) {
 		passthrough();

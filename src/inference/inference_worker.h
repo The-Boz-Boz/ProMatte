@@ -99,6 +99,8 @@ public:
 	bool hasMatte() const { return matteAvailable_.load(); }
 
 	WorkerStatus status() const;
+	// Cheap state query for the render thread (no string copies).
+	WorkerState state() const;
 	PerfStats stats() const;
 	PerformanceController &performance() { return perf_; }
 	void resetTemporal();
@@ -117,8 +119,14 @@ public:
 
 private:
 	void threadMain();
-	bool applyConfigLocked(WorkerConfig cfg);
-	bool initializeBackend(WorkerConfig &cfg, std::string &error);
+	// keepCurrentOnFailure: used for automatic model switches - when the new model
+	// cannot be initialised, the current model and backend stay in service.
+	bool applyConfigLocked(WorkerConfig cfg, bool keepCurrentOnFailure = false);
+	// Creates and initialises a backend for `cfg` without touching backend_.
+	std::unique_ptr<SegmentationBackend> initializeBackend(const WorkerConfig &cfg, std::string &error);
+	void publishModel(const WorkerConfig &cfg, bool usingFallback);
+	void handleInferenceError(const std::string &error);
+	void tryReinitialize();
 	void updateAiResolution();
 	void processOne(FrameBuffer &frame);
 	void reportCost(bool force);
@@ -169,6 +177,17 @@ private:
 	PerformanceController perf_;
 	double lastProcessedMs_ = -1;
 	int tier_ = 0;
+
+	// error recovery: after kErrorsBeforeReset failed runs in a row the backend is
+	// dropped and re-initialised after 1, 2, 4, ... kMaxReinitDelayMs.
+	static constexpr int kErrorsBeforeReset = 3;
+	static constexpr double kErrorLogIntervalMs = 10000.0;
+	static constexpr double kMaxReinitDelayMs = 30000.0;
+	int consecutiveErrors_ = 0;
+	unsigned long long suppressedErrors_ = 0;
+	double lastErrorLogMs_ = -1;
+	double reinitDelayMs_ = 0;
+	double reinitDueMs_ = -1; // < 0: no re-initialisation scheduled
 	std::atomic<uint32_t> aiW_{0}, aiH_{0};
 	std::atomic<float> ratio_{1.f};
 
