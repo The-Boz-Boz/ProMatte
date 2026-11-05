@@ -33,27 +33,27 @@
       "tiers": [
         {
           "label": "Performance",
-          "width": 512,
-          "height": 288,
-          "downsample_ratio": 0.5
+          "width": 640,
+          "height": 352,
+          "downsample_ratio": 0.4
         },
         {
           "label": "Balanced",
-          "width": 640,
-          "height": 352,
-          "downsample_ratio": 0.5
+          "width": 896,
+          "height": 512,
+          "downsample_ratio": 0.375
         },
         {
           "label": "Quality",
-          "width": 896,
-          "height": 512,
-          "downsample_ratio": 0.5
+          "width": 1024,
+          "height": 576,
+          "downsample_ratio": 0.375
         },
         {
           "label": "Ultra",
           "width": 1280,
           "height": 704,
-          "downsample_ratio": 0.5
+          "downsample_ratio": 0.375
         }
       ],
       "recurrent": true,
@@ -99,27 +99,27 @@
       "tiers": [
         {
           "label": "Performance",
-          "width": 512,
-          "height": 288,
-          "downsample_ratio": 0.5
+          "width": 640,
+          "height": 352,
+          "downsample_ratio": 0.4
         },
         {
           "label": "Balanced",
-          "width": 640,
-          "height": 352,
-          "downsample_ratio": 0.5
+          "width": 896,
+          "height": 512,
+          "downsample_ratio": 0.375
         },
         {
           "label": "Quality",
-          "width": 896,
-          "height": 512,
-          "downsample_ratio": 0.5
+          "width": 1024,
+          "height": 576,
+          "downsample_ratio": 0.375
         },
         {
           "label": "Ultra",
           "width": 1280,
           "height": 704,
-          "downsample_ratio": 0.5
+          "downsample_ratio": 0.375
         }
       ],
       "recurrent": true,

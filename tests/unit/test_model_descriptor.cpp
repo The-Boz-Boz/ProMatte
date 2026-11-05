@@ -155,3 +155,45 @@ TEST_CASE("alignDim rounds to model alignment")
 	d.alignment = 1;
 	CHECK(d.alignDim(501) == 501);
 }
+
+TEST_CASE("RVM tiers follow the RVM inference guide for both precisions")
+{
+	std::string text;
+	REQUIRE(fs::readTextFile(fs::joinPath(PROMATTE_SOURCE_DIR, "data/models/manifest.json"), text));
+	std::vector<ModelDescriptor> models;
+	std::string err;
+	REQUIRE_MESSAGE(parseModelManifest(text, models, err), err);
+	struct Expected {
+		const char *label;
+		uint32_t w, h;
+		float ratio;
+	};
+	const Expected expected[] = {{"Performance", 640, 352, 0.4f},
+				     {"Balanced", 896, 512, 0.375f},
+				     {"Quality", 1024, 576, 0.375f},
+				     {"Ultra", 1280, 704, 0.375f}};
+	int seen = 0;
+	for (const auto &m : models) {
+		if (m.family != "rvm")
+			continue;
+		++seen;
+		CAPTURE(m.id);
+		REQUIRE(m.tiers.size() == 4);
+		CHECK(m.alignment == 32);
+		for (size_t i = 0; i < 4; ++i) {
+			const ResolutionTier &t = m.tiers[i];
+			CHECK(t.label == expected[i].label);
+			CHECK(t.width == expected[i].w);
+			CHECK(t.height == expected[i].h);
+			CHECK(t.downsampleRatio == doctest::Approx(expected[i].ratio));
+			CHECK(t.width % m.alignment == 0);
+			CHECK(t.height % m.alignment == 0);
+			// Encoder resolution (long side) inside RVM's recommended 256..512.
+			CHECK(t.width * t.downsampleRatio >= 256.f);
+			CHECK(t.width * t.downsampleRatio <= 512.f);
+			if (i > 0)
+				CHECK(t.width * t.height > m.tiers[i - 1].width * m.tiers[i - 1].height); // cheapest first
+		}
+	}
+	CHECK(seen == 2); // rvm_mobilenetv3 (FP32) and rvm_mobilenetv3_fp16
+}

@@ -135,7 +135,7 @@ a per-model tier ladder (see `data/models/manifest.json`):
 
 | Model | Tiers |
 | ----- | ----- |
-| RVM | 512×288 · 640×352 · 896×512 · 1280×704 (all with downsample ratio 0.5, i.e. the encoder runs at half of that) |
+| RVM (FP32 and FP16) | 640×352 @ 0.4 · 896×512 · 1024×576 · 1280×704 @ 0.375 (the encoder runs at input × ratio, ~256–480 px wide, as RVM's inference guide recommends) |
 | MODNet | 320×192 · 448×256 · 512×288 · 640×384 |
 | fixed-shape models | one tier |
 

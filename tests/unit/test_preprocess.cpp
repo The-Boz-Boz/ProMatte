@@ -208,3 +208,16 @@ TEST_CASE("motion estimate: identical frames score 0, a small shift scores above
 	MESSAGE("noise " << noiseDiff << ", 6 px shift " << moveDiff);
 	CHECK(moveDiff > 1.5);
 }
+
+TEST_CASE("RVM tiers keep their size for a 1280x720 camera")
+{
+	// Pixel budget + aspect + alignment 32 must land exactly on the manifest tiers
+	// for the common 16:9 webcam, never above the source.
+	const uint32_t tiers[4][2] = {{640, 352}, {896, 512}, {1024, 576}, {1280, 704}};
+	for (const auto &t : tiers) {
+		uint32_t w = 0, h = 0;
+		chooseAiResolution(1280, 720, t[0], t[1], false, 32, w, h);
+		CHECK(w == t[0]);
+		CHECK(h == t[1]);
+	}
+}
