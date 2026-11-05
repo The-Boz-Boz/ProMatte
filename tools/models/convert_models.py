@@ -102,6 +102,7 @@ def unzip(name):
 def paddle_model_dir(extracted):
     """The archives contain a single inference-model directory."""
     for base, _dirs, files in os.walk(extracted):
+        _dirs[:] = [d for d in _dirs if d != "__MACOSX"]
         if any(f.endswith(".pdmodel") for f in files):
             return base
     raise SystemExit(f"no .pdmodel found under {extracted}")
