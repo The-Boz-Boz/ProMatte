@@ -295,7 +295,9 @@ std::optional<ModelDescriptor> ModelManager::selectModel(bool gpuBackend, bool p
 	const ModelDescriptor *best = nullptr;
 	int bestScore = -1;
 	for (const auto &s : all) {
-		if (!s.installed || s.desc.family == "custom")
+		// Precision variants are chosen through preferredVariant(), never ranked
+		// against their own base model.
+		if (!s.installed || s.desc.family == "custom" || !s.desc.variantOf.empty())
 			continue;
 		if (blocked && blocked(s.desc.id))
 			continue;
@@ -328,6 +330,8 @@ std::optional<ModelDescriptor> ModelManager::betterModel(const std::string &curr
 							 const std::function<bool(const std::string &)> &blocked) const
 {
 	auto cur = find(currentId);
+	// A variant ranks like its base model and is never the "better" model itself.
+	const std::string baseId = cur && !cur->variantOf.empty() ? cur->variantOf : currentId;
 	const int curQuality = cur ? cur->qualityRank : -1;
 	const int curCost = cur ? cur->costRank : -1;
 	const ModelDescriptor *best = nullptr;
@@ -335,7 +339,8 @@ std::optional<ModelDescriptor> ModelManager::betterModel(const std::string &curr
 	// list() returns by value: keep it alive until after the loop.
 	const std::vector<ModelStatus> all = list();
 	for (const auto &s : all) {
-		if (!s.installed || s.desc.family == "custom" || s.desc.id == currentId)
+		if (!s.installed || s.desc.family == "custom" || s.desc.id == currentId || s.desc.id == baseId ||
+		    !s.desc.variantOf.empty())
 			continue;
 		if (blocked && blocked(s.desc.id))
 			continue;
@@ -351,6 +356,37 @@ std::optional<ModelDescriptor> ModelManager::betterModel(const std::string &curr
 	if (!best)
 		return std::nullopt;
 	return *best;
+}
+
+std::string ModelManager::preferredVariant(const std::string &id, bool gpuBackend,
+					   const std::function<bool(const std::string &)> &blocked) const
+{
+	auto d = find(id);
+	if (!d)
+		return {};
+	const std::string base = d->variantOf.empty() ? id : d->variantOf;
+	const std::vector<ModelStatus> all = list();
+	if (gpuBackend) {
+		for (const auto &s : all) {
+			if (!s.installed || s.desc.variantOf != base || !s.desc.recommendedForGpu)
+				continue;
+			if (!(blocked && blocked(s.desc.id)))
+				return s.desc.id;
+		}
+	}
+	// CPU (or no usable GPU variant): the base model when it is installed.
+	for (const auto &s : all)
+		if (s.desc.id == base && s.installed && !(blocked && blocked(base)))
+			return base;
+	return id;
+}
+
+std::string ModelManager::alternatePrecision(const std::string &id) const
+{
+	auto d = find(id);
+	if (!d || d->variantOf.empty())
+		return {};
+	return isInstalled(d->variantOf) ? d->variantOf : std::string{};
 }
 
 } // namespace promatte

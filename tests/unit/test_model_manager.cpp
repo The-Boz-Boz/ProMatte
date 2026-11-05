@@ -209,3 +209,46 @@ TEST_CASE("model selection prefers cheap models first and climbs")
 	REQUIRE(best.has_value());
 	CHECK(best->id == "heavy");
 }
+
+TEST_CASE("precision variants: FP16 on GPU, FP32 on CPU, never ranked on their own")
+{
+	std::string bundled = tempDir("var_bundled");
+	std::string user = tempDir("var_user");
+	const char *manifest = R"({"models":[
+	  {"id":"cheap","file_name":"cheap.onnx","license":"MIT","bundled":true,"quality_rank":45,"cost_rank":10,
+	   "tiers":[{"width":8,"height":8}]},
+	  {"id":"rvm","file_name":"rvm32.onnx","license":"GPL","bundled":true,"quality_rank":90,"cost_rank":60,
+	   "precision":"fp32","tiers":[{"width":8,"height":8}]},
+	  {"id":"rvm_fp16","file_name":"rvm16.onnx","license":"GPL","bundled":true,"quality_rank":90,"cost_rank":60,
+	   "precision":"fp16","variant_of":"rvm","recommended_for_gpu":true,"tiers":[{"width":8,"height":8}]}
+	]})";
+	ModelManager mm(bundled, user);
+	std::string err;
+	REQUIRE(mm.loadManifestText(manifest, err));
+	REQUIRE(fs::writeTextFile(fs::joinPath(bundled, "cheap.onnx"), "x"));
+	REQUIRE(fs::writeTextFile(fs::joinPath(bundled, "rvm32.onnx"), "x"));
+	// Only FP32 installed: it is used everywhere and has no alternative.
+	CHECK(mm.preferredVariant("rvm", true) == "rvm");
+	CHECK(mm.preferredVariant("rvm", false) == "rvm");
+	CHECK(mm.alternatePrecision("rvm").empty());
+
+	REQUIRE(fs::writeTextFile(fs::joinPath(bundled, "rvm16.onnx"), "x"));
+	CHECK(mm.find("rvm_fp16")->variantOf == "rvm");
+	CHECK(mm.preferredVariant("rvm", true) == "rvm_fp16");
+	CHECK(mm.preferredVariant("rvm", false) == "rvm");
+	CHECK(mm.preferredVariant("rvm_fp16", false) == "rvm"); // a saved variant id still maps back on CPU
+	CHECK(mm.preferredVariant("cheap", true) == "cheap");
+	CHECK(mm.preferredVariant("nope", true).empty());
+	// A variant known to be too slow is not chosen.
+	CHECK(mm.preferredVariant("rvm", true, [](const std::string &id) { return id == "rvm_fp16"; }) == "rvm");
+	CHECK(mm.alternatePrecision("rvm_fp16") == "rvm");
+	CHECK(mm.alternatePrecision("rvm").empty());
+	// Selection and climbing see the network once, by its base id.
+	auto up = mm.betterModel("cheap", true, nullptr);
+	REQUIRE(up.has_value());
+	CHECK(up->id == "rvm");
+	CHECK_FALSE(mm.betterModel("rvm_fp16", true, nullptr).has_value());
+	auto best = mm.selectModel(true, false, nullptr);
+	REQUIRE(best.has_value());
+	CHECK(best->id == "rvm");
+}

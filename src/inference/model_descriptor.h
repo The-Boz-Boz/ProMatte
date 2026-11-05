@@ -39,6 +39,14 @@ struct ModelDescriptor {
 	uint64_t sizeBytes = 0;
 	bool bundled = false;
 	int version = 1;
+	// Weight/activation precision of the file ("fp32", "fp16"). Informational: the
+	// backend reads the actual tensor types from the graph.
+	std::string precision = "fp32";
+	// Non-empty for a precision variant of another manifest entry (e.g. the FP16
+	// RVM export is a variant of "rvm_mobilenetv3"). Variants are not offered as
+	// models of their own: selecting the base id picks the variant that suits the
+	// backend (ModelManager::preferredVariant).
+	std::string variantOf;
 
 	TensorLayout inputLayout = TensorLayout::NCHW;
 	ChannelOrder channelOrder = ChannelOrder::RGB;

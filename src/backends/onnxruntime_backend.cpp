@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstring>
 #include <mutex>
+#include <stdexcept>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -16,6 +17,7 @@
 #include <dml_provider_factory.h>
 #endif
 
+#include "preprocessing/preprocess.h"
 #include "utils/file_utils.h"
 #include "utils/logging.h"
 #include "utils/system_info.h"
@@ -140,6 +142,32 @@ const DirectMLModule &directML()
 	return instance;
 }
 #endif
+
+bool isFloatType(ONNXTensorElementDataType t)
+{
+	return t == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT || t == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16;
+}
+
+const char *elementTypeName(ONNXTensorElementDataType t)
+{
+	switch (t) {
+	case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
+		return "float32";
+	case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
+		return "float16";
+	default:
+		return "other";
+	}
+}
+
+// Element type of a tensor input/output; UNDEFINED for non-tensors. The
+// TypeInfo must stay alive while its tensor view is used (see discoverIo).
+ONNXTensorElementDataType tensorElementType(const Ort::TypeInfo &typeInfo)
+{
+	if (typeInfo.GetONNXType() != ONNX_TYPE_TENSOR)
+		return ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
+	return typeInfo.GetTensorTypeAndShapeInfo().GetElementType();
+}
 
 } // namespace
 
@@ -449,6 +477,19 @@ bool OnnxRuntimeBackend::discoverIo(std::string &error)
 	for (size_t i = 0; i < nOut; ++i)
 		outputs.emplace_back(session_->GetOutputNameAllocated(i, alloc).get());
 
+	std::vector<ONNXTensorElementDataType> inTypes, outTypes;
+	for (size_t i = 0; i < nIn; ++i)
+		inTypes.push_back(tensorElementType(session_->GetInputTypeInfo(i)));
+	for (size_t i = 0; i < nOut; ++i)
+		outTypes.push_back(tensorElementType(session_->GetOutputTypeInfo(i)));
+	auto typeOf = [](const std::vector<std::string> &names, const std::vector<ONNXTensorElementDataType> &types,
+			 const std::string &name) {
+		for (size_t i = 0; i < names.size(); ++i)
+			if (names[i] == name)
+				return types[i];
+		return ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
+	};
+
 	if (model_.recurrent) {
 		for (const auto &n : inputs) {
 			if (n == "src" || n == model_.inputName)
@@ -488,6 +529,36 @@ bool OnnxRuntimeBackend::discoverIo(std::string &error)
 			return false;
 		}
 	}
+
+	// Element types: float32 and float16 models are both supported. The source
+	// frame and the recurrent state must share one type; downsample_ratio stays
+	// float32 in both RVM exports.
+	io_.srcType = typeOf(inputs, inTypes, io_.src);
+	io_.alphaType = typeOf(outputs, outTypes, io_.alpha);
+	if (!isFloatType(io_.srcType) || !isFloatType(io_.alphaType)) {
+		error = "model input '" + io_.src + "' / output '" + io_.alpha + "' must be float32 or float16";
+		return false;
+	}
+	if (!io_.foreground.empty()) {
+		io_.foregroundType = typeOf(outputs, outTypes, io_.foreground);
+		if (!isFloatType(io_.foregroundType))
+			io_.foreground.clear(); // optional output: ignore it rather than fail
+	}
+	for (size_t i = 0; i < io_.recIn.size(); ++i) {
+		if (typeOf(inputs, inTypes, io_.recIn[i]) != io_.srcType ||
+		    typeOf(outputs, outTypes, io_.recOut[i]) != io_.srcType) {
+			error = "recurrent state '" + io_.recIn[i] + "' does not match the " +
+				elementTypeName(io_.srcType) + " input";
+			return false;
+		}
+	}
+	if (!io_.ratio.empty() && typeOf(inputs, inTypes, io_.ratio) != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+		error = "downsample_ratio must be float32";
+		return false;
+	}
+	caps_.fp16 = io_.srcType == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16;
+	PM_LOG_INFO("model '%s': input %s, alpha %s", model_.id.c_str(), elementTypeName(io_.srcType),
+		    elementTypeName(io_.alphaType));
 
 	// Log shapes for diagnostics.
 	for (size_t i = 0; i < nIn; ++i) {
@@ -541,6 +612,7 @@ void OnnxRuntimeBackend::shutdown()
 #endif
 	stateValid_ = false;
 	caps_.available = false;
+	caps_.fp16 = false;
 }
 
 bool OnnxRuntimeBackend::processFrame(const InferenceInput &input, InferenceOutput &output, std::string &error)
@@ -581,11 +653,48 @@ bool OnnxRuntimeBackend::processFrame(const InferenceInput &input, InferenceOutp
 	}
 }
 
-bool OnnxRuntimeBackend::runSimple(const InferenceInput &input, InferenceOutput &output, std::string &error)
+Ort::Value OnnxRuntimeBackend::makeSrcTensor(const InferenceInput &input)
 {
 	const size_t count = size_t(input.width) * input.height * 3;
-	Ort::Value in = Ort::Value::CreateTensor<float>(cpuMemory_, const_cast<float *>(input.data), count,
-							input.shape.data(), input.shape.size());
+	if (io_.srcType == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+		const uint16_t *half = input.dataHalf;
+		if (!half) {
+			// The worker normally preprocesses straight to float16; convert here
+			// only for callers that did not (tests, tools).
+			if (!input.data)
+				throw std::runtime_error("no input data");
+			halfInput_.resize(count);
+			for (size_t i = 0; i < count; ++i)
+				halfInput_[i] = floatToHalf(input.data[i]);
+			half = halfInput_.data();
+		}
+		return Ort::Value::CreateTensor(cpuMemory_, const_cast<uint16_t *>(half), count * sizeof(uint16_t),
+						input.shape.data(), input.shape.size(), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16);
+	}
+	if (!input.data)
+		throw std::runtime_error("no float32 input data");
+	return Ort::Value::CreateTensor<float>(cpuMemory_, const_cast<float *>(input.data), count, input.shape.data(),
+					       input.shape.size());
+}
+
+const float *OnnxRuntimeBackend::floatData(const Ort::Value &v, size_t count, std::vector<float> &scratch,
+					   std::string &error) const
+{
+	const auto type = v.GetTensorTypeAndShapeInfo().GetElementType();
+	if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)
+		return v.GetTensorData<float>();
+	if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+		scratch.resize(count);
+		halfToFloatN(v.GetTensorData<uint16_t>(), scratch.data(), count);
+		return scratch.data();
+	}
+	error = "model output is neither float32 nor float16";
+	return nullptr;
+}
+
+bool OnnxRuntimeBackend::runSimple(const InferenceInput &input, InferenceOutput &output, std::string &error)
+{
+	Ort::Value in = makeSrcTensor(input);
 	const char *inNames[] = {io_.src.c_str()};
 	const char *outNames[] = {io_.alpha.c_str()};
 	auto results = session_->Run(runOptions_, inNames, &in, 1, outNames, 1);
@@ -595,16 +704,14 @@ bool OnnxRuntimeBackend::runSimple(const InferenceInput &input, InferenceOutput 
 	}
 	auto info = results[0].GetTensorTypeAndShapeInfo();
 	auto shape = info.GetShape();
-	if (info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
-		error = "model output is not float32";
+	const float *raw = floatData(results[0], info.GetElementCount(), alphaScratch_, error);
+	if (!raw)
 		return false;
-	}
 	output.width = input.width;
 	output.height = input.height;
 	output.alpha.resize(size_t(input.width) * input.height);
 	output.foreground.clear();
-	if (!decodeModelOutput(model_, results[0].GetTensorData<float>(), shape, input.width, input.height,
-			       output.alpha.data())) {
+	if (!decodeModelOutput(model_, raw, shape, input.width, input.height, output.alpha.data())) {
 		std::string s;
 		for (auto d : shape)
 			s += (s.empty() ? "" : "x") + std::to_string(d);
@@ -623,20 +730,27 @@ bool OnnxRuntimeBackend::runRecurrent(const InferenceInput &input, InferenceOutp
 	if (needReset)
 		resetRecurrentState();
 
-	const size_t count = size_t(input.width) * input.height * 3;
-	Ort::Value src = Ort::Value::CreateTensor<float>(cpuMemory_, const_cast<float *>(input.data), count,
-							 input.shape.data(), input.shape.size());
+	Ort::Value src = makeSrcTensor(input);
 	float ratio = input.downsampleRatio > 0.f ? input.downsampleRatio : 1.f;
 	const int64_t ratioShape[1] = {1};
 	Ort::Value ratioVal = Ort::Value::CreateTensor<float>(cpuMemory_, &ratio, 1, ratioShape, 1);
 
 	// Initial recurrent state: RVM accepts zeros of shape (1,1,1,1) and broadcasts.
+	// Same element type as src (float16 models take float16 state).
 	std::vector<Ort::Value> zeroStates;
 	if (recState_.empty()) {
 		zeroState_.assign(1, 0.f);
+		zeroStateHalf_ = 0;
 		const int64_t zshape[4] = {1, 1, 1, 1};
-		for (size_t i = 0; i < nRec; ++i)
-			zeroStates.push_back(Ort::Value::CreateTensor<float>(cpuMemory_, zeroState_.data(), 1, zshape, 4));
+		for (size_t i = 0; i < nRec; ++i) {
+			if (io_.srcType == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16)
+				zeroStates.push_back(Ort::Value::CreateTensor(cpuMemory_, &zeroStateHalf_,
+									      sizeof(zeroStateHalf_), zshape, 4,
+									      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16));
+			else
+				zeroStates.push_back(
+					Ort::Value::CreateTensor<float>(cpuMemory_, zeroState_.data(), 1, zshape, 4));
+		}
 	}
 
 	const bool wantFg = model_.providesForeground && !io_.foreground.empty();
@@ -724,8 +838,10 @@ bool OnnxRuntimeBackend::runRecurrent(const InferenceInput &input, InferenceOutp
 		ModelDescriptor alphaDesc = model_;
 		alphaDesc.outputKind = OutputKind::Alpha;
 		alphaDesc.outputLayout = TensorLayout::NCHW;
-		if (!decodeModelOutput(alphaDesc, results[0].GetTensorData<float>(), shape, input.width, input.height,
-				       output.alpha.data())) {
+		const float *raw = floatData(results[0], info.GetElementCount(), alphaScratch_, error);
+		if (!raw)
+			return false;
+		if (!decodeModelOutput(alphaDesc, raw, shape, input.width, input.height, output.alpha.data())) {
 			error = "unexpected alpha shape";
 			return false;
 		}
@@ -737,8 +853,10 @@ bool OnnxRuntimeBackend::runRecurrent(const InferenceInput &input, InferenceOutp
 		auto shape = info.GetShape();
 		const size_t n = size_t(input.width) * input.height;
 		if (shape.size() == 4 && shape[1] == 3 && size_t(shape[2]) == input.height && size_t(shape[3]) == input.width) {
+			const float *fg = floatData(results[1], 3 * n, foregroundScratch_, error);
+			if (!fg)
+				return false;
 			output.foreground.resize(3 * n);
-			const float *fg = results[1].GetTensorData<float>();
 			for (size_t i = 0; i < 3 * n; ++i)
 				output.foreground[i] = std::clamp(fg[i], 0.f, 1.f);
 		} else {

@@ -298,12 +298,21 @@ obs_properties_t *buildProperties(void *data)
 	obs_property_t *model = obs_properties_add_list(q, keys::Model, T("Model"), OBS_COMBO_TYPE_LIST,
 							OBS_COMBO_FORMAT_STRING);
 	obs_property_list_add_string(model, T("Model.Auto"), "auto");
-	for (const auto &m : mm.list()) {
+	// Precision variants (RVM FP16) are not listed: choosing the base model picks
+	// the file that suits the backend. The base entry counts as installed when
+	// only a variant is.
+	const std::vector<ModelStatus> models = mm.list();
+	for (const auto &m : models) {
+		if (!m.desc.variantOf.empty())
+			continue;
+		bool installed = m.installed;
+		for (const auto &v : models)
+			installed = installed || (v.installed && v.desc.variantOf == m.desc.id);
 		std::string label = m.desc.displayName;
-		if (!m.installed)
+		if (!installed)
 			label += std::string(" ") + T("Model.NotInstalled");
 		size_t idx = obs_property_list_add_string(model, label.c_str(), m.desc.id.c_str());
-		if (!m.installed)
+		if (!installed)
 			obs_property_list_item_disable(model, idx, true);
 	}
 	obs_property_t *backend = obs_properties_add_list(q, keys::Backend, T("Backend"), OBS_COMBO_TYPE_LIST,

@@ -1,5 +1,7 @@
 #include <doctest.h>
 
+#include <cmath>
+#include <limits>
 #include <vector>
 
 #include "preprocessing/preprocess.h"
@@ -89,4 +91,75 @@ TEST_CASE("chooseAiResolution keeps aspect and alignment for dynamic models")
 	chooseAiResolution(320, 180, 1280, 704, false, 32, w, h);
 	CHECK(w <= 320);
 	CHECK(h <= 180);
+}
+
+TEST_CASE("float16 conversion round-trips and handles the edge cases")
+{
+	// Exactly representable values survive both directions.
+	const float exact[] = {0.f, 1.f, -1.f, 0.5f, 2.f, 1024.f, 65504.f, -65504.f, 6.103515625e-05f /* 2^-14 */,
+			       5.9604644775390625e-08f /* 2^-24, smallest subnormal */, 0.333251953125f};
+	for (float v : exact)
+		CHECK(halfToFloat(floatToHalf(v)) == v);
+	CHECK(floatToHalf(0.f) == 0x0000);
+	CHECK(floatToHalf(-0.f) == 0x8000);
+	CHECK(floatToHalf(1.f) == 0x3C00);
+	CHECK(floatToHalf(65504.f) == 0x7BFF);
+	CHECK(floatToHalf(1e6f) == 0x7C00);   // overflow -> +inf
+	CHECK(floatToHalf(-1e6f) == 0xFC00);  // -inf
+	CHECK(floatToHalf(65520.f) == 0x7C00); // halfway above the max rounds to inf
+	CHECK(floatToHalf(1e-9f) == 0x0000);  // underflow -> 0
+	CHECK(floatToHalf(5.9604644775390625e-08f) == 0x0001);
+	const uint16_t nan = floatToHalf(std::numeric_limits<float>::quiet_NaN());
+	CHECK((nan & 0x7C00) == 0x7C00);
+	CHECK((nan & 0x03FF) != 0);
+	CHECK(std::isinf(halfToFloat(0x7C00)));
+	CHECK(std::isnan(halfToFloat(0x7E00)));
+	// Round to nearest even: 1 + 2^-11 is halfway between 1 and 1 + 2^-10.
+	CHECK(floatToHalf(1.f + 1.f / 2048.f) == 0x3C00);
+	CHECK(floatToHalf(1.f + 3.f / 2048.f) == 0x3C02);
+	// Every half value survives half -> float -> half (NaNs excluded).
+	int bad = 0;
+	for (uint32_t i = 0; i < 65536; ++i) {
+		const uint16_t h = uint16_t(i);
+		if ((h & 0x7C00) == 0x7C00 && (h & 0x03FF))
+			continue;
+		if (floatToHalf(halfToFloat(h)) != h)
+			++bad;
+	}
+	CHECK(bad == 0);
+	// Bulk conversion matches the scalar one.
+	const uint16_t in[4] = {0x3C00, 0xC000, 0x0001, 0x7BFF};
+	float out[4];
+	halfToFloatN(in, out, 4);
+	for (int i = 0; i < 4; ++i)
+		CHECK(out[i] == halfToFloat(in[i]));
+	// Relative error of normal numbers stays within half an ULP (2^-11).
+	for (float v = 1e-4f; v < 60000.f; v *= 1.37f) {
+		const float r = halfToFloat(floatToHalf(v));
+		CHECK(std::fabs(r - v) <= v * (1.f / 2048.f));
+	}
+}
+
+TEST_CASE("bgraToTensorHalf matches bgraToTensor")
+{
+	const uint8_t px[16] = {0, 128, 255, 255, 10, 20, 30, 255, 255, 255, 255, 255, 1, 254, 77, 255};
+	for (int layout = 0; layout < 2; ++layout) {
+		PreprocessOptions o;
+		o.layout = layout == 0 ? TensorLayout::NCHW : TensorLayout::NHWC;
+		o.order = ChannelOrder::RGB;
+		o.mean[0] = 0.485f;
+		o.mean[1] = 0.456f;
+		o.mean[2] = 0.406f;
+		o.std[0] = 0.229f;
+		o.std[1] = 0.224f;
+		o.std[2] = 0.225f;
+		float ref[12];
+		uint16_t half[12];
+		bgraToTensor(px, 2, 2, 8, o, ref);
+		bgraToTensorHalf(px, 2, 2, 8, o, half);
+		for (int i = 0; i < 12; ++i) {
+			CHECK(half[i] == floatToHalf(ref[i]));
+			CHECK(halfToFloat(half[i]) == doctest::Approx(ref[i]).epsilon(1e-3));
+		}
+	}
 }

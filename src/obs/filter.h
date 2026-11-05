@@ -39,6 +39,8 @@ struct FilterContext {
 	uint64_t lastRenderNs = 0;
 	uint64_t lastFrameTime = 0; // obs_get_video_frame_time of the last processed frame
 	uint64_t lastOverlayNs = 0;
+	uint64_t lastDownloadCheckNs = 0;
+	bool downloadWasActive = false; // a Model manager download was running at the last check
 	std::atomic<bool> workerEnabled{true};
 	bool bypassLogged = false;
 	std::string resolvedModelId; // model actually configured on the worker

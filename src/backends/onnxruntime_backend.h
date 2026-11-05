@@ -46,12 +46,21 @@ private:
 		std::string ratio;               // downsample_ratio
 		std::string alpha;               // pha / output
 		std::string foreground;          // fgr (optional)
+		// Element types from the graph. src and the recurrent state share one type
+		// (FLOAT or FLOAT16); downsample_ratio is always FLOAT.
+		ONNXTensorElementDataType srcType = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
+		ONNXTensorElementDataType alphaType = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
+		ONNXTensorElementDataType foregroundType = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
 	};
 
 	bool discoverIo(std::string &error);
 	bool runRecurrent(const InferenceInput &input, InferenceOutput &output, std::string &error);
 	bool runSimple(const InferenceInput &input, InferenceOutput &output, std::string &error);
 	void resetRecurrentState();
+	// Wraps the preprocessed frame as the model's src tensor (float or float16).
+	Ort::Value makeSrcTensor(const InferenceInput &input);
+	// Float view of a FLOAT or FLOAT16 output tensor (converted into `scratch`).
+	const float *floatData(const Ort::Value &v, size_t count, std::vector<float> &scratch, std::string &error) const;
 
 	BackendKind kind_;
 	BackendCapabilities caps_;
@@ -66,6 +75,9 @@ private:
 	IoNames io_;
 	std::vector<Ort::Value> recState_; // recurrent state values (device or CPU)
 	std::vector<float> zeroState_;
+	uint16_t zeroStateHalf_ = 0; // float16 +0.0
+	std::vector<uint16_t> halfInput_; // float -> float16 when a caller only provided float data
+	std::vector<float> alphaScratch_, foregroundScratch_;
 	bool useDeviceBinding_ = false;
 	bool stateValid_ = false;
 	uint32_t stateW_ = 0, stateH_ = 0;

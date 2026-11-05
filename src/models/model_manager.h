@@ -69,6 +69,18 @@ public:
 	std::optional<ModelDescriptor> betterModel(const std::string &currentId, bool gpuBackend,
 						   const std::function<bool(const std::string &)> &blocked) const;
 
+	// Precision variants (ModelDescriptor::variantOf): maps a selected model id to
+	// the installed file that suits the backend. On a GPU backend the installed,
+	// non-blocked variant recommended for GPUs wins (RVM FP16 on DirectML); on the
+	// CPU the base model wins (FP32). Returns `id` itself when it has no usable
+	// alternative and an empty string for unknown ids.
+	std::string preferredVariant(const std::string &id, bool gpuBackend,
+				     const std::function<bool(const std::string &)> &blocked = nullptr) const;
+	// For a precision variant: its base model when that is installed (RVM FP16 ->
+	// FP32), else empty. The worker falls back to it when the variant fails to
+	// initialise on the GPU and prefers it on the CPU backend.
+	std::string alternatePrecision(const std::string &id) const;
+
 	const std::string &userDir() const { return userDir_; }
 	const std::string &bundledDir() const { return bundledDir_; }
 

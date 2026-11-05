@@ -1,12 +1,15 @@
 #include <doctest.h>
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <functional>
 #include <thread>
 
 #include "inference/backend_registry.h"
 #include "inference/inference_worker.h"
 #include "models/model_manager.h"
+#include "preprocessing/preprocess.h"
 #include "utils/file_utils.h"
 
 using namespace promatte;
@@ -151,4 +154,94 @@ TEST_CASE("worker processes frames with a real model on the CPU backend (latest 
 	w.setConfig(cfg);
 	REQUIRE(waitFor([&] { return w.status().state == WorkerState::Running; }, 15000));
 	w.stop();
+}
+
+TEST_CASE("RVM FP16 and FP32 exports agree on the CPU backend")
+{
+	ModelDescriptor m32, m16;
+	std::string p32, p16;
+	if (!loadModel(m32, p32, "rvm_mobilenetv3") || !loadModel(m16, p16, "rvm_mobilenetv3_fp16")) {
+		MESSAGE("RVM models not downloaded; skipping");
+		return;
+	}
+	CHECK(m16.variantOf == "rvm_mobilenetv3");
+	CHECK(m16.precision == "fp16");
+	const uint32_t w = 256, h = 160;
+	// Smooth synthetic frame: a bright blob in the middle of a dark ramp.
+	std::vector<float> src(size_t(3) * w * h);
+	for (uint32_t y = 0; y < h; ++y)
+		for (uint32_t x = 0; x < w; ++x) {
+			const float dx = (float(x) - w / 2.f) / w, dy = (float(y) - h / 2.f) / h;
+			const float v = dx * dx + dy * dy < 0.04f ? 0.8f : 0.1f + 0.2f * float(x) / w;
+			for (int c = 0; c < 3; ++c)
+				src[size_t(c) * w * h + size_t(y) * w + x] = v;
+		}
+	InferenceInput in;
+	in.data = src.data();
+	in.width = w;
+	in.height = h;
+	in.shape = {1, 3, int64_t(h), int64_t(w)};
+	in.downsampleRatio = 0.5f;
+	BackendConfig bc;
+	bc.kind = BackendKind::CPU;
+	bc.cpuThreads = 2;
+
+	InferenceOutput o32, o16;
+	std::string err;
+	auto b32 = createBackend(BackendKind::CPU);
+	REQUIRE_MESSAGE(b32->initialize(bc, m32, p32, err), err);
+	CHECK_FALSE(b32->capabilities().fp16);
+	auto b16 = createBackend(BackendKind::CPU);
+	REQUIRE_MESSAGE(b16->initialize(bc, m16, p16, err), err);
+	CHECK(b16->capabilities().fp16);
+	// A few frames so the recurrent state (float16 on the FP16 model) is exercised.
+	for (int i = 0; i < 3; ++i) {
+		REQUIRE_MESSAGE(b32->processFrame(in, o32, err), err);
+		REQUIRE_MESSAGE(b16->processFrame(in, o16, err), err);
+	}
+	REQUIRE(o16.alpha.size() == o32.alpha.size());
+	REQUIRE(o16.foreground.size() == o32.foreground.size());
+	double diff = 0, maxDiff = 0;
+	for (size_t i = 0; i < o32.alpha.size(); ++i) {
+		const double d = std::abs(double(o32.alpha[i]) - double(o16.alpha[i]));
+		diff += d;
+		maxDiff = std::max(maxDiff, d);
+	}
+	diff /= double(o32.alpha.size());
+	double mean32 = 0, mean16 = 0;
+	for (size_t i = 0; i < o32.alpha.size(); ++i) {
+		mean32 += o32.alpha[i];
+		mean16 += o16.alpha[i];
+	}
+	MESSAGE("RVM fp16 vs fp32 alpha: mean |d| " << diff << ", max " << maxDiff << ", alpha mean "
+		<< mean32 / double(o32.alpha.size()) << " / " << mean16 / double(o16.alpha.size()));
+	CHECK(diff < 0.01);
+	// A synthetic frame has no person, so alpha is ~0 on both; the predicted
+	// foreground colour (~ the input) exercises the float16 output path.
+	REQUIRE(o32.foreground.size() == size_t(3) * w * h);
+	double fgDiff = 0, fgMean = 0;
+	for (size_t i = 0; i < o32.foreground.size(); ++i) {
+		fgDiff += std::abs(double(o32.foreground[i]) - double(o16.foreground[i]));
+		fgMean += o16.foreground[i];
+	}
+	fgDiff /= double(o32.foreground.size());
+	fgMean /= double(o16.foreground.size());
+	MESSAGE("RVM fp16 vs fp32 foreground: mean |d| " << fgDiff << ", mean " << fgMean);
+	CHECK(fgMean > 0.05);
+	CHECK(fgDiff < 0.01);
+
+	// float16 input supplied directly (the worker's path) gives the same result.
+	std::vector<uint16_t> half(src.size());
+	for (size_t i = 0; i < src.size(); ++i)
+		half[i] = floatToHalf(src[i]);
+	InferenceInput inHalf = in;
+	inHalf.data = nullptr;
+	inHalf.dataHalf = half.data();
+	InferenceOutput o16b;
+	b16->resetState();
+	for (int i = 0; i < 3; ++i)
+		REQUIRE_MESSAGE(b16->processFrame(inHalf, o16b, err), err);
+	REQUIRE(o16b.alpha.size() == o16.alpha.size());
+	for (size_t i = 0; i < o16.alpha.size(); i += 97)
+		CHECK(o16b.alpha[i] == doctest::Approx(o16.alpha[i]).epsilon(1e-3));
 }

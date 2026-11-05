@@ -129,6 +129,8 @@ bool parseModelManifest(const std::string &text, std::vector<ModelDescriptor> &o
 		d.sizeBytes = get<uint64_t>(m, "size_bytes", 0);
 		d.bundled = get<bool>(m, "bundled", false);
 		d.version = get<int>(m, "version", 1);
+		d.precision = get<std::string>(m, "precision", "fp32");
+		d.variantOf = get<std::string>(m, "variant_of", "");
 
 		std::string layout = get<std::string>(m, "input_layout", "NCHW");
 		if (!parseLayout(layout, d.inputLayout)) {

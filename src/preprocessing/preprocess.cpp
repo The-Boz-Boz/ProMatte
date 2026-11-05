@@ -2,24 +2,25 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+#include <vector>
 
 namespace promatte {
 
-void bgraToTensor(const uint8_t *bgra, uint32_t w, uint32_t h, uint32_t stride, const PreprocessOptions &opt, float *out)
+namespace {
+
+// Writes one BGRA8 frame through per-channel lookup tables into a planar (NCHW)
+// or interleaved (NHWC) tensor; T is float or raw float16 bits.
+template<typename T>
+void bgraThroughLut(const uint8_t *bgra, uint32_t w, uint32_t h, uint32_t stride, const PreprocessOptions &opt,
+		    const T (&lut)[3][256], T *out)
 {
 	const size_t n = size_t(w) * h;
-	// Precompute per-channel lookup tables (256 entries) — avoids per-pixel divides.
-	float lut[3][256];
-	for (int c = 0; c < 3; ++c) {
-		float inv = opt.std[c] != 0.f ? 1.f / opt.std[c] : 1.f;
-		for (int v = 0; v < 256; ++v)
-			lut[c][v] = (float(v) / 255.f - opt.mean[c]) * inv;
-	}
 	// Source is BGRA: index 0 = B, 1 = G, 2 = R. Map to tensor channel order.
 	const int srcIdx[3] = {opt.order == ChannelOrder::RGB ? 2 : 0, 1, opt.order == ChannelOrder::RGB ? 0 : 2};
 
 	if (opt.layout == TensorLayout::NCHW) {
-		float *c0 = out, *c1 = out + n, *c2 = out + 2 * n;
+		T *c0 = out, *c1 = out + n, *c2 = out + 2 * n;
 		for (uint32_t y = 0; y < h; ++y) {
 			const uint8_t *row = bgra + size_t(y) * stride;
 			size_t base = size_t(y) * w;
@@ -33,7 +34,7 @@ void bgraToTensor(const uint8_t *bgra, uint32_t w, uint32_t h, uint32_t stride, 
 	} else {
 		for (uint32_t y = 0; y < h; ++y) {
 			const uint8_t *row = bgra + size_t(y) * stride;
-			float *o = out + size_t(y) * w * 3;
+			T *o = out + size_t(y) * w * 3;
 			for (uint32_t x = 0; x < w; ++x) {
 				const uint8_t *p = row + size_t(x) * 4;
 				o[x * 3 + 0] = lut[0][p[srcIdx[0]]];
@@ -42,6 +43,107 @@ void bgraToTensor(const uint8_t *bgra, uint32_t w, uint32_t h, uint32_t stride, 
 			}
 		}
 	}
+}
+
+void buildFloatLut(const PreprocessOptions &opt, float (&lut)[3][256])
+{
+	// Precompute per-channel lookup tables (256 entries) — avoids per-pixel divides.
+	for (int c = 0; c < 3; ++c) {
+		float inv = opt.std[c] != 0.f ? 1.f / opt.std[c] : 1.f;
+		for (int v = 0; v < 256; ++v)
+			lut[c][v] = (float(v) / 255.f - opt.mean[c]) * inv;
+	}
+}
+
+} // namespace
+
+uint16_t floatToHalf(float v)
+{
+	uint32_t f;
+	std::memcpy(&f, &v, sizeof(f));
+	const uint32_t sign = (f >> 16) & 0x8000u;
+	const uint32_t absf = f & 0x7FFFFFFFu;
+	if (absf >= 0x7F800000u) // Inf or NaN (keep NaN quiet and non-zero)
+		return uint16_t(sign | 0x7C00u | (absf > 0x7F800000u ? 0x0200u | ((absf >> 13) & 0x03FFu) : 0u));
+	if (absf >= 0x477FF000u) // rounds to >= 65520: overflow to Inf
+		return uint16_t(sign | 0x7C00u);
+	if (absf < 0x38800000u) { // below the smallest normal half (2^-14): subnormal or zero
+		if (absf < 0x33000000u) // < 2^-25: rounds to zero
+			return uint16_t(sign);
+		const uint32_t mant = (absf & 0x007FFFFFu) | 0x00800000u;
+		const int shift = 113 - int(absf >> 23) + 13; // 126 - exp, plus the 13 dropped mantissa bits
+		uint32_t half = mant >> shift;
+		const uint32_t rem = mant & ((1u << shift) - 1u);
+		const uint32_t halfway = 1u << (shift - 1);
+		if (rem > halfway || (rem == halfway && (half & 1u)))
+			++half;
+		return uint16_t(sign | half);
+	}
+	// Normal: rebias the exponent (127 -> 15) and round the mantissa to 10 bits.
+	uint32_t half = ((absf >> 13) - (112u << 10));
+	const uint32_t rem = absf & 0x1FFFu;
+	if (rem > 0x1000u || (rem == 0x1000u && (half & 1u)))
+		++half; // a carry into the exponent is the correct result
+	return uint16_t(sign | half);
+}
+
+float halfToFloat(uint16_t h)
+{
+	const uint32_t sign = uint32_t(h & 0x8000u) << 16;
+	const uint32_t exp = (h >> 10) & 0x1Fu;
+	uint32_t mant = h & 0x03FFu;
+	uint32_t f;
+	if (exp == 0x1Fu) {
+		f = sign | 0x7F800000u | (mant << 13);
+	} else if (exp != 0) {
+		f = sign | ((exp + 112u) << 23) | (mant << 13);
+	} else if (mant == 0) {
+		f = sign;
+	} else {
+		// Subnormal half: normalise into a float.
+		uint32_t e = 113;
+		while (!(mant & 0x0400u)) {
+			mant <<= 1;
+			--e;
+		}
+		f = sign | (e << 23) | ((mant & 0x03FFu) << 13);
+	}
+	float v;
+	std::memcpy(&v, &f, sizeof(v));
+	return v;
+}
+
+void halfToFloatN(const uint16_t *in, float *out, size_t n)
+{
+	// 256 KB table, built once (thread-safe static init).
+	static const std::vector<float> table = [] {
+		std::vector<float> t(65536);
+		for (uint32_t i = 0; i < 65536; ++i)
+			t[i] = halfToFloat(uint16_t(i));
+		return t;
+	}();
+	const float *t = table.data();
+	for (size_t i = 0; i < n; ++i)
+		out[i] = t[in[i]];
+}
+
+void bgraToTensor(const uint8_t *bgra, uint32_t w, uint32_t h, uint32_t stride, const PreprocessOptions &opt, float *out)
+{
+	float lut[3][256];
+	buildFloatLut(opt, lut);
+	bgraThroughLut(bgra, w, h, stride, opt, lut, out);
+}
+
+void bgraToTensorHalf(const uint8_t *bgra, uint32_t w, uint32_t h, uint32_t stride, const PreprocessOptions &opt,
+		      uint16_t *out)
+{
+	float lut[3][256];
+	buildFloatLut(opt, lut);
+	uint16_t halfLut[3][256];
+	for (int c = 0; c < 3; ++c)
+		for (int v = 0; v < 256; ++v)
+			halfLut[c][v] = floatToHalf(lut[c][v]);
+	bgraThroughLut(bgra, w, h, stride, opt, halfLut, out);
 }
 
 void bgraToLuma(const uint8_t *bgra, uint32_t w, uint32_t h, uint32_t stride, uint8_t *luma)

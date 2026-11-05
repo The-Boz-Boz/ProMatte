@@ -262,7 +262,7 @@ void InferenceWorker::updateAiResolution()
 		    t.downsampleRatio, config_.sourceWidth, config_.sourceHeight);
 }
 
-std::unique_ptr<SegmentationBackend> InferenceWorker::initializeBackend(const WorkerConfig &cfg, std::string &error)
+std::unique_ptr<SegmentationBackend> InferenceWorker::initializeBackend(WorkerConfig &cfg, std::string &error)
 {
 	if (cfg.model.id.empty() || cfg.modelPath.empty()) {
 		error = "no model selected";
@@ -280,6 +280,7 @@ std::unique_ptr<SegmentationBackend> InferenceWorker::initializeBackend(const Wo
 		if (kind != BackendKind::CPU)
 			attempts.push_back(BackendKind::CPU);
 	}
+	const bool haveAlt = !cfg.altModel.id.empty() && !cfg.altModelPath.empty();
 	std::string lastError;
 	for (BackendKind k : attempts) {
 		if (stopping_) {
@@ -290,20 +291,37 @@ std::unique_ptr<SegmentationBackend> InferenceWorker::initializeBackend(const Wo
 			lastError = std::string(backendKindName(k)) + " not available";
 			continue;
 		}
-		auto b = createBackend(k);
-		std::string err;
-		if (b->initialize(cfg.backend, cfg.model, cfg.modelPath, err)) {
-			if (stopping_) {
-				error = "worker stopping";
-				return nullptr;
+		// GPU: the configured model first, then the other precision (FP16 that
+		// the provider rejects -> FP32). CPU: the alternative first, because the
+		// owner only sets one when `model` is the GPU-oriented variant.
+		std::vector<bool> useAlt{false};
+		if (haveAlt)
+			useAlt = k == BackendKind::CPU ? std::vector<bool>{true, false} : std::vector<bool>{false, true};
+		for (bool alt : useAlt) {
+			const ModelDescriptor &model = alt ? cfg.altModel : cfg.model;
+			const std::string &path = alt ? cfg.altModelPath : cfg.modelPath;
+			auto b = createBackend(k);
+			std::string err;
+			if (b->initialize(cfg.backend, model, path, err)) {
+				if (stopping_) {
+					error = "worker stopping";
+					return nullptr;
+				}
+				if (k != kind)
+					PM_LOG_WARN("backend %s failed (%s); fell back to %s", backendKindName(kind),
+						    lastError.c_str(), backendKindName(k));
+				if (alt) {
+					PM_LOG_INFO("using model '%s' instead of '%s' on %s", cfg.altModel.id.c_str(),
+						    cfg.model.id.c_str(), backendKindName(k));
+					std::swap(cfg.model, cfg.altModel);
+					std::swap(cfg.modelPath, cfg.altModelPath);
+				}
+				return b;
 			}
-			if (k != kind)
-				PM_LOG_WARN("backend %s failed (%s); fell back to %s", backendKindName(kind), lastError.c_str(),
-					    backendKindName(k));
-			return b;
+			lastError = err;
+			PM_LOG_WARN("backend %s init failed for model '%s': %s", backendKindName(k), model.id.c_str(),
+				    err.c_str());
 		}
-		lastError = err;
-		PM_LOG_WARN("backend %s init failed: %s", backendKindName(k), err.c_str());
 	}
 	error = lastError.empty() ? "no inference backend available" : lastError;
 	return nullptr;
@@ -339,6 +357,13 @@ void InferenceWorker::publishModel(const WorkerConfig &cfg, bool usingFallback)
 bool InferenceWorker::applyConfigLocked(WorkerConfig cfg, bool keepCurrentOnFailure)
 {
 	// ctrlMutex_ is NOT held here (called from the worker thread after copying).
+	// The owner re-posting the precision pair the worker already swapped (FP16
+	// rejected, FP32 running) is the same configuration, not a new model.
+	if (backend_ && cfg.altModel.id == config_.model.id && cfg.model.id == config_.altModel.id &&
+	    cfg.altModelPath == config_.modelPath && !cfg.altModel.id.empty()) {
+		std::swap(cfg.model, cfg.altModel);
+		std::swap(cfg.modelPath, cfg.altModelPath);
+	}
 	const bool needBackend = !backend_ || cfg.model.id != config_.model.id || cfg.modelPath != config_.modelPath ||
 				 cfg.backend.kind != config_.backend.kind ||
 				 cfg.backend.deviceIndex != config_.backend.deviceIndex ||
@@ -557,6 +582,8 @@ void InferenceWorker::threadMain()
 						WorkerConfig cfg = config_;
 						cfg.model = target;
 						cfg.modelPath = targetPath;
+						cfg.altModel = ModelDescriptor{}; // belonged to the outgoing model
+						cfg.altModelPath.clear();
 						cfg.fallbackModel = ModelDescriptor{};
 						cfg.fallbackModelPath.clear();
 						cfg.upgradeModel = ModelDescriptor{};
@@ -752,13 +779,19 @@ void InferenceWorker::processOne(FrameBuffer &frame)
 	// Preprocess
 	Stopwatch sw;
 	const size_t n = size_t(w) * h;
-	tensor_.resize(n * 3);
+	const bool fp16 = backend_->capabilities().fp16;
 	PreprocessOptions po;
 	po.layout = m.inputLayout;
 	po.order = m.channelOrder;
 	std::copy_n(m.mean, 3, po.mean);
 	std::copy_n(m.std, 3, po.std);
-	bgraToTensor(pixels, w, h, stride, po, tensor_.data());
+	if (fp16) {
+		tensorHalf_.resize(n * 3);
+		bgraToTensorHalf(pixels, w, h, stride, po, tensorHalf_.data());
+	} else {
+		tensor_.resize(n * 3);
+		bgraToTensor(pixels, w, h, stride, po, tensor_.data());
+	}
 	luma_.resize(n);
 	bgraToLuma(pixels, w, h, stride, luma_.data());
 	const double preMs = sw.elapsedMs();
@@ -766,7 +799,8 @@ void InferenceWorker::processOne(FrameBuffer &frame)
 	// Inference
 	sw.reset();
 	InferenceInput in;
-	in.data = tensor_.data();
+	in.data = fp16 ? nullptr : tensor_.data();
+	in.dataHalf = fp16 ? tensorHalf_.data() : nullptr;
 	in.width = w;
 	in.height = h;
 	in.downsampleRatio = ratio_.load();

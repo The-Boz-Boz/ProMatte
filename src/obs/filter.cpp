@@ -43,12 +43,16 @@ std::function<bool(const std::string &)> blockedModels(const std::string &device
 std::string resolveModelId(const FilterSettings &s, bool gpu, const std::string &deviceKey)
 {
 	ModelManager &mm = modelManager();
+	auto blocked = blockedModels(deviceKey);
 	if (s.modelId != "auto") {
-		if (mm.isInstalled(s.modelId))
-			return s.modelId;
+		// "rvm_mobilenetv3" stands for the network, not the file: GPU backends get
+		// the FP16 export when it is installed, the CPU gets FP32. Saved settings
+		// keep naming the base id, so nothing has to be migrated.
+		const std::string id = mm.preferredVariant(s.modelId, gpu, blocked);
+		if (!id.empty() && mm.isInstalled(id))
+			return id;
 		PM_LOG_WARN("model '%s' is not installed; falling back to automatic selection", s.modelId.c_str());
 	}
-	auto blocked = blockedModels(deviceKey);
 	// Prefer the best model this device has already been measured to run inside its
 	// budget; otherwise start with the cheapest one and let the controller climb.
 	const CapabilityStore &store = capabilityStore();
@@ -67,9 +71,9 @@ std::string resolveModelId(const FilterSettings &s, bool gpu, const std::string 
 		}
 	}
 	if (bestKnown)
-		return bestKnown->id;
+		return mm.preferredVariant(bestKnown->id, gpu, blocked);
 	auto d = mm.selectModel(gpu, /*preferCheap=*/true, blocked);
-	return d ? d->id : std::string{};
+	return d ? mm.preferredVariant(d->id, gpu, blocked) : std::string{};
 }
 
 } // namespace
@@ -161,6 +165,15 @@ void FilterContext::configureWorker(const std::string &modelOverride)
 			cfg.model = *d;
 			cfg.modelPath = mm.resolvePath(modelId);
 		}
+		// The other precision of the same network: the worker falls back to it
+		// when the FP16 file fails to initialise on the GPU (and prefers it on CPU).
+		const std::string altId = mm.alternatePrecision(modelId);
+		if (!altId.empty()) {
+			if (auto a = mm.find(altId)) {
+				cfg.altModel = *a;
+				cfg.altModelPath = mm.resolvePath(altId);
+			}
+		}
 	}
 	resolvedModelId = modelId;
 	configuredBackend = backendKindName(effective);
@@ -168,17 +181,21 @@ void FilterContext::configureWorker(const std::string &modelOverride)
 	if (cfg.modelAutoSelected) {
 		auto blocked = blockedModels(deviceKey);
 		// Cheapest usable model as the emergency fallback.
+		auto pick = [&](const std::string &id, ModelDescriptor &desc, std::string &path) {
+			const std::string variant = mm.preferredVariant(id, gpuBackend, blocked);
+			if (auto d = mm.find(variant)) {
+				desc = *d;
+				path = mm.resolvePath(variant);
+			}
+		};
+		const std::string baseId = cfg.model.variantOf.empty() ? modelId : cfg.model.variantOf;
 		if (auto fb = mm.selectModel(false, /*preferCheap=*/true, [&](const std::string &id) {
-			    return id == modelId || blocked(id);
-		    })) {
-			cfg.fallbackModel = *fb;
-			cfg.fallbackModelPath = mm.resolvePath(fb->id);
-		}
+			    return id == modelId || id == baseId || blocked(id);
+		    }))
+			pick(fb->id, cfg.fallbackModel, cfg.fallbackModelPath);
 		// Next model up the quality ladder, tried when there is measured headroom.
-		if (auto up = mm.betterModel(modelId, gpuBackend, blocked)) {
-			cfg.upgradeModel = *up;
-			cfg.upgradeModelPath = mm.resolvePath(up->id);
-		}
+		if (auto up = mm.betterModel(modelId, gpuBackend, blocked))
+			pick(up->id, cfg.upgradeModel, cfg.upgradeModelPath);
 	}
 	cfg.quality = s.quality;
 	cfg.manualTier = s.manualTier;
@@ -355,6 +372,18 @@ void filterTickImpl(void *data, float seconds)
 	ctx->background.tick(seconds);
 	// All (re)configuration happens here, on the graphics thread: requests from the
 	// UI, filter_update and the worker thread only raise flags.
+	// A model that finished downloading may be the better file for this
+	// selection (e.g. RVM FP16 for "rvm_mobilenetv3" on DirectML): re-resolve.
+	{
+		const uint64_t nowNs = os_gettime_ns();
+		if (nowNs - ctx->lastDownloadCheckNs >= 1000000000ULL) {
+			ctx->lastDownloadCheckNs = nowNs;
+			const DownloadState dl = modelManager().downloadState();
+			if (ctx->downloadWasActive && !dl.active && dl.succeeded)
+				ctx->reconfigureRequested = true;
+			ctx->downloadWasActive = dl.active;
+		}
+	}
 	const bool modelChanged = ctx->modelChangedByWorker.exchange(false);
 	if (ctx->reconfigureRequested.exchange(false))
 		ctx->configureWorker();

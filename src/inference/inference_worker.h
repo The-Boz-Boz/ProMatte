@@ -22,6 +22,12 @@ struct WorkerConfig {
 	BackendConfig backend;
 	ModelDescriptor model;
 	std::string modelPath;
+	// The same network in another precision (RVM FP32 for the FP16 file), or
+	// empty. Tried when `model` cannot be initialised on a GPU backend, and
+	// preferred over `model` on the CPU backend. When it is used the worker swaps
+	// the two, so `model` always names what actually runs.
+	ModelDescriptor altModel;
+	std::string altModelPath;
 	// Cheaper model used when even the lowest tier of `model` is too slow (Auto only).
 	ModelDescriptor fallbackModel;
 	std::string fallbackModelPath;
@@ -124,7 +130,9 @@ private:
 	// cannot be initialised, the current model and backend stay in service.
 	bool applyConfigLocked(WorkerConfig cfg, bool keepCurrentOnFailure = false);
 	// Creates and initialises a backend for `cfg` without touching backend_.
-	std::unique_ptr<SegmentationBackend> initializeBackend(const WorkerConfig &cfg, std::string &error);
+	// Swaps cfg.model and cfg.altModel when the alternative precision is the one
+	// that initialised.
+	std::unique_ptr<SegmentationBackend> initializeBackend(WorkerConfig &cfg, std::string &error);
 	void publishModel(const WorkerConfig &cfg, bool usingFallback);
 	// The only way backend_ changes (worker thread, or stop() after the join).
 	// Refuses to install a new backend while the worker is being stopped.
@@ -181,6 +189,7 @@ private:
 	std::mutex backendMutex_;
 	std::unique_ptr<SegmentationBackend> backend_;
 	std::vector<float> tensor_;
+	std::vector<uint16_t> tensorHalf_; // float16 models (BackendCapabilities::fp16)
 	std::vector<uint8_t> luma_;
 	std::vector<uint8_t> resized_;
 	FrameBuffer work_;

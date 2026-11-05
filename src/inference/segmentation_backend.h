@@ -18,6 +18,7 @@ struct BackendCapabilities {
 	bool available = false;
 	bool supportsDynamicShapes = true;
 	bool supportsDeviceBinding = false; // recurrent state can stay on device
+	bool fp16 = false;                  // model input (and recurrent state) is float16: feed InferenceInput::dataHalf
 };
 
 struct BackendConfig {
@@ -29,7 +30,8 @@ struct BackendConfig {
 };
 
 struct InferenceInput {
-	const float *data = nullptr;   // preprocessed tensor
+	const float *data = nullptr;   // preprocessed tensor (float32 models)
+	const uint16_t *dataHalf = nullptr; // same tensor as float16 bits (capabilities().fp16 models)
 	std::vector<int64_t> shape;    // e.g. {1,3,H,W} or {1,H,W,3}
 	uint32_t width = 0;
 	uint32_t height = 0;
