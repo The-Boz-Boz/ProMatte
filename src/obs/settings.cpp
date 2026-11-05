@@ -150,6 +150,7 @@ void settingsDefaults(obs_data_t *d)
 	obs_data_set_default_int(d, keys::UpsampleQuality, 1);
 	obs_data_set_default_double(d, keys::Stability, 0.6);
 	obs_data_set_default_double(d, keys::MotionResponse, 0.6);
+	obs_data_set_default_double(d, keys::EdgeTemporal, 0.5);
 	obs_data_set_default_string(d, keys::DebugView, "none");
 	obs_data_set_default_bool(d, keys::Overlay, false);
 	obs_data_set_default_string(d, keys::ModelToManage, "rvm_mobilenetv3");
@@ -201,6 +202,7 @@ FilterSettings settingsLoad(obs_data_t *d)
 	s.upsampleQuality = int(std::clamp<long long>(obs_data_get_int(d, keys::UpsampleQuality), 0, 1));
 	s.stability = clamp01(obs_data_get_double(d, keys::Stability));
 	s.motionResponse = clamp01(obs_data_get_double(d, keys::MotionResponse));
+	s.edgeTemporal = clamp01(obs_data_get_double(d, keys::EdgeTemporal));
 	s.debugView = debugViewFromKey(obs_data_get_string(d, keys::DebugView));
 	s.overlay = obs_data_get_bool(d, keys::Overlay);
 	if (s.modelId.empty())

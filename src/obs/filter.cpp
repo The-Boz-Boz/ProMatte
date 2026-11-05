@@ -208,6 +208,7 @@ void FilterContext::configureWorker(const std::string &modelOverride)
 	worker->setMotionSkip(s.motionSkip, s.motionSkipParams(), double(s.motionSkipMaxStaleMs));
 	worker->setNeedForeground(s.needsModelForeground());
 	worker->setConfig(cfg);
+	edgeHistoryReset = true; // a new matte stream: do not blend with the old one
 	PM_LOG_INFO("filter '%s': backend=%s model=%s quality=%s", obs_source_get_name(source), configuredBackend.c_str(),
 		    modelId.empty() ? "(none)" : modelId.c_str(), qualityModeName(s.quality));
 }
@@ -535,6 +536,9 @@ void filterRenderImpl(void *data)
 		return;
 	}
 
+	if (ctx->edgeHistoryReset.exchange(false))
+		ctx->gpu.resetEdgeHistory();
+
 	// 1. Capture the source into our texture.
 	if (!ctx->gpu.captureBegin(w, h)) {
 		passthrough();
@@ -604,6 +608,7 @@ void filterRenderImpl(void *data)
 		p.haloRemoval = s.haloRemoval;
 		p.upsampleQuality = s.upsampleQuality;
 		p.rangeSigma = 0.08f + 0.10f * s.smoothness;
+		p.edgeTemporal = s.edgeTemporal;
 		p.debugView = s.debugView;
 		uint32_t bgW = 0, bgH = 0;
 		gs_texture_t *bg = nullptr;
@@ -657,6 +662,7 @@ void filterShow(void *data)
 		ctx->workerEnabled = true;
 		ctx->worker->setEnabled(true);
 		ctx->worker->resetTemporal();
+		ctx->edgeHistoryReset = true;
 	}
 }
 

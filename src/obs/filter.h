@@ -42,6 +42,9 @@ struct FilterContext {
 	uint64_t lastDownloadCheckNs = 0;
 	bool downloadWasActive = false; // a Model manager download was running at the last check
 	std::atomic<bool> workerEnabled{true};
+	// Set when the full-resolution edge history must be dropped (filter shown
+	// again, worker reconfigured); consumed by video_render.
+	std::atomic<bool> edgeHistoryReset{false};
 	bool bypassLogged = false;
 	// Synchronous-matte statistics (graphics thread only), logged every 60 s.
 	struct SyncStats {

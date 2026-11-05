@@ -55,6 +55,7 @@ constexpr const char *FillHoles = "edge_fill_holes";
 constexpr const char *UpsampleQuality = "edge_upsample_quality";
 constexpr const char *Stability = "temporal_stability";
 constexpr const char *MotionResponse = "temporal_motion";
+constexpr const char *EdgeTemporal = "temporal_edge";
 constexpr const char *DebugView = "debug_view";
 constexpr const char *Overlay = "debug_overlay";
 constexpr const char *ModelToManage = "mm_model";
@@ -104,6 +105,7 @@ struct FilterSettings {
 
 	float stability = 0.6f;
 	float motionResponse = 0.6f;
+	float edgeTemporal = 0.5f; // full-resolution edge-band smoothing, 0 = off
 
 	DebugView debugView = DebugView::None;
 	bool overlay = false;

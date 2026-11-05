@@ -25,6 +25,8 @@ struct RenderParams {
 	float haloRemoval = 0.3f;
 	int upsampleQuality = 1;
 	float rangeSigma = 0.12f;
+	// Full-resolution temporal smoothing inside the edge band, 0 = off, 1 = max.
+	float edgeTemporal = 0.5f;
 	DebugView debugView = DebugView::None;
 };
 
@@ -61,6 +63,8 @@ public:
 	void uploadMatte(const MatteBuffer &m);
 	bool hasMatte() const { return matteTex_ != nullptr; }
 	void dropMatte();
+	// Forgets the edge temporal history (filter shown again, model restarted).
+	void resetEdgeHistory() { edgeHistoryValid_ = false; }
 
 	// Draws the final result to the current render target (w x h). When
 	// `reuseRefined` is set the joint-bilateral upsample, feather and background
@@ -96,6 +100,12 @@ private:
 	gs_texrender_t *mergeRender_ = nullptr;   // AI-res: rgb = colour, a = matte
 	gs_texrender_t *alphaRender_ = nullptr;
 	gs_texrender_t *featherRender_[2] = {nullptr, nullptr};
+	// Edge temporal smoothing: ping-pong pair, the previous output is the history.
+	gs_texrender_t *edgeRender_[2] = {nullptr, nullptr};
+	int edgeIndex_ = 0;            // target of the next EdgeTemporal pass
+	bool edgeHistoryValid_ = false; // edgeRender_[edgeIndex_ ^ 1] holds the last output
+	uint32_t edgeW_ = 0, edgeH_ = 0;
+	bool matteFresh_ = false; // a matte was uploaded since the last refineAlpha
 	gs_texrender_t *premulRender_ = nullptr;
 	std::vector<gs_texrender_t *> blurDown_;
 	std::vector<gs_texrender_t *> blurUp_;

@@ -93,6 +93,8 @@ bool GpuPipeline::loadEffects(const std::string &dir, std::string &error)
 	alphaRender_ = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
 	featherRender_[0] = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
 	featherRender_[1] = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
+	edgeRender_[0] = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
+	edgeRender_[1] = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
 	premulRender_ = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
 	bgEstRender_ = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
 	for (int i = 0; i < 5; ++i) {
@@ -110,6 +112,9 @@ void GpuPipeline::free()
 	destroyRender(alphaRender_);
 	destroyRender(featherRender_[0]);
 	destroyRender(featherRender_[1]);
+	destroyRender(edgeRender_[0]);
+	destroyRender(edgeRender_[1]);
+	edgeHistoryValid_ = false;
 	destroyRender(premulRender_);
 	destroyRender(bgEstRender_);
 	for (auto &r : blurDown_)
@@ -142,6 +147,7 @@ bool GpuPipeline::captureBegin(uint32_t w, uint32_t h)
 	if (w != w_ || h != h_) {
 		lastAlpha_ = nullptr;
 		lastBgEstimate_ = nullptr;
+		edgeHistoryValid_ = false;
 	}
 	if (!srcRender_ || w == 0 || h == 0)
 		return false;
@@ -264,7 +270,7 @@ void GpuPipeline::uploadMatte(const MatteBuffer &m)
 	if (m.empty())
 		return;
 	if (!matteTex_ || matteW_ != m.width || matteH_ != m.height) {
-		dropMatte();
+		dropMatte(); // also resets the edge history: a new matte stream
 		matteTex_ = gs_texture_create(m.width, m.height, GS_RGBA, 1, nullptr, GS_DYNAMIC);
 		if (!matteTex_)
 			return;
@@ -274,6 +280,7 @@ void GpuPipeline::uploadMatte(const MatteBuffer &m)
 	}
 	gs_texture_set_image(matteTex_, m.rgba.data(), m.width * 4, false);
 	matteHasFg_ = m.hasForeground;
+	matteFresh_ = true;
 }
 
 void GpuPipeline::dropMatte()
@@ -285,6 +292,8 @@ void GpuPipeline::dropMatte()
 	}
 	matteW_ = matteH_ = 0;
 	matteHasFg_ = false;
+	matteFresh_ = false;
+	edgeHistoryValid_ = false;
 }
 
 gs_texture_t *GpuPipeline::refineAlpha(const RenderParams &p)
@@ -315,6 +324,37 @@ gs_texture_t *GpuPipeline::refineAlpha(const RenderParams &p)
 	gs_texture_t *alpha = gs_texrender_get_texture(alphaRender_);
 	if (!alpha)
 		return nullptr;
+	const bool newMatte = matteFresh_;
+	matteFresh_ = false;
+	// Temporal smoothing of the edge band at full resolution. Runs once per
+	// video frame (render() reuses the result for further outputs); the matte of
+	// this frame is always the input, the history only damps flicker where the
+	// image did not move. Applied before the feather, which is deterministic.
+	if (p.edgeTemporal > 0.001f && edgeRender_[0] && edgeRender_[1]) {
+		gs_texrender_t *target = edgeRender_[edgeIndex_];
+		const bool haveHistory = edgeHistoryValid_ && edgeW_ == w_ && edgeH_ == h_;
+		gs_texture_t *history = haveHistory ? gs_texrender_get_texture(edgeRender_[edgeIndex_ ^ 1]) : nullptr;
+		const float k = std::max(1.f - std::clamp(p.edgeTemporal, 0.f, 1.f), 0.15f);
+		drawEffect(refineFx_, "EdgeTemporal", alpha, target, w_, h_, [&] {
+			setTex(refineFx_, "history", history ? history : alpha);
+			setTex(refineFx_, "sourceTex", src);
+			setVec2(refineFx_, "guideTexel", 1.f / float(w_), 1.f / float(h_));
+			setFloat(refineFx_, "edgeK", k);
+			setFloat(refineFx_, "historyValid", history ? 1.f : 0.f);
+			setFloat(refineFx_, "newMatte", newMatte ? 1.f : 0.f);
+		});
+		if (gs_texture_t *smoothed = gs_texrender_get_texture(target)) {
+			alpha = smoothed;
+			edgeHistoryValid_ = true;
+			edgeW_ = w_;
+			edgeH_ = h_;
+			edgeIndex_ ^= 1;
+		} else {
+			edgeHistoryValid_ = false;
+		}
+	} else {
+		edgeHistoryValid_ = false;
+	}
 	if (p.featherPx >= 0.5f) {
 		auto featherParams = [&](float dx, float dy) {
 			return [this, &p, dx, dy] {

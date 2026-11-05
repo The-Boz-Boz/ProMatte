@@ -5,6 +5,10 @@
 //                          crisp, edge-aligned alpha without the blockiness of
 //                          plain bilinear upscaling. Output: r = refined alpha,
 //                          g = bilinear alpha (for the confidence debug view).
+//  EdgeTemporal          : temporal smoothing of the upsampled alpha inside the
+//                          edge band, against the previous output (history).
+//                          Output: r = alpha, g = bilinear alpha (passed
+//                          through), b = source luma (next frame's history).
 //  FeatherH / FeatherV   : separable Gaussian feathering of the alpha plane.
 uniform float4x4 ViewProj;
 uniform texture2d image;      // full-resolution source (guide)
@@ -17,6 +21,11 @@ uniform float  rangeSigma;    // colour similarity sigma (0.05..0.3)
 uniform float2 texel;         // 1 / output size (feather)
 uniform float  radius;        // feather radius in output pixels
 uniform float2 direction;     // (1,0) or (0,1)
+uniform texture2d history;    // EdgeTemporal: previous output (r alpha, b luma)
+uniform texture2d sourceTex;  // EdgeTemporal: full-resolution source
+uniform float  edgeK;         // EdgeTemporal: blend factor inside the band (1 = off)
+uniform float  historyValid;  // EdgeTemporal: 0 = no usable history, pass through
+uniform float  newMatte;      // EdgeTemporal: 1 when a new matte arrived this frame
 
 sampler_state linearSampler {
 	Filter    = Linear;
@@ -111,6 +120,58 @@ float4 PSUpsample5(VertData v_in) : TARGET
 	return jbu(v_in.uv, 2); // 4x4 neighbourhood weighted
 }
 
+float lumaOf(float3 c)
+{
+	return dot(c, float3(0.299, 0.587, 0.114));
+}
+
+// 1 inside the semi-transparent edge band, 0 for solid foreground/background.
+float edgeBand(float a)
+{
+	return smoothstep(0.02, 0.05, a) * (1.0 - smoothstep(0.95, 0.98, a));
+}
+
+// Largest change of the 2x2-averaged source luma around the pixel (four
+// bilinear taps, a 3x3 footprint) against the luma stored in the history.
+float lumaChange(float2 uv)
+{
+	float2 h = guideTexel * 0.5;
+	float2 o0 = float2(-h.x, -h.y);
+	float2 o1 = float2( h.x, -h.y);
+	float2 o2 = float2(-h.x,  h.y);
+	float2 o3 = float2( h.x,  h.y);
+	float d = abs(lumaOf(sourceTex.Sample(linearSampler, uv + o0).rgb) - history.Sample(linearSampler, uv + o0).b);
+	d = max(d, abs(lumaOf(sourceTex.Sample(linearSampler, uv + o1).rgb) - history.Sample(linearSampler, uv + o1).b));
+	d = max(d, abs(lumaOf(sourceTex.Sample(linearSampler, uv + o2).rgb) - history.Sample(linearSampler, uv + o2).b));
+	d = max(d, abs(lumaOf(sourceTex.Sample(linearSampler, uv + o3).rgb) - history.Sample(linearSampler, uv + o3).b));
+	return d;
+}
+
+float4 PSEdgeTemporal(VertData v_in) : TARGET
+{
+	float2 uv = v_in.uv;
+	float4 cur = image.Sample(pointSampler, uv);
+	float lumaHere = lumaOf(sourceTex.Sample(pointSampler, uv).rgb);
+	if (historyValid < 0.5)
+		return float4(cur.r, cur.g, lumaHere, 1.0);
+	float4 prev = history.Sample(pointSampler, uv);
+	float d = lumaChange(uv);
+	// Blend only in the edge band (of either frame, so a strand that flickers
+	// out is caught too) and only where the image did not change: any real
+	// motion (|delta luma| over the 3x3 above the noise) passes straight through.
+	float band = max(edgeBand(cur.r), edgeBand(prev.r));
+	float motion = smoothstep(0.025, 0.06, d);
+	float k = lerp(1.0, edgeK, band * (1.0 - motion));
+	// OBS renders more frames than a 20-30 fps camera delivers. With no new
+	// matte and an unchanged source pixel (a repeated frame; the stored luma is
+	// 8-bit, hence the small tolerance) the history is held, so repeats do not
+	// count as extra blending steps.
+	if (newMatte < 0.5 && d < 0.004)
+		k = 0.0;
+	float a = lerp(prev.r, cur.r, k);
+	return float4(a, cur.g, lumaHere, 1.0);
+}
+
 float4 PSFeather(VertData v_in) : TARGET
 {
 	// 9-tap Gaussian (sigma = radius / 2) sampled at multiples of radius / 4.
@@ -154,6 +215,15 @@ technique Upsample5
 	{
 		vertex_shader = VSDefault(v_in);
 		pixel_shader  = PSUpsample5(v_in);
+	}
+}
+
+technique EdgeTemporal
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader  = PSEdgeTemporal(v_in);
 	}
 }
 

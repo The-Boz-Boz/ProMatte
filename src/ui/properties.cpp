@@ -367,6 +367,7 @@ obs_properties_t *buildProperties(void *data)
 	obs_properties_t *t = obs_properties_create();
 	slider(t, keys::Stability, "Stability", 0.0, 1.0);
 	slider(t, keys::MotionResponse, "MotionResponse", 0.0, 1.0);
+	slider(t, keys::EdgeTemporal, "EdgeTemporal", 0.0, 1.0);
 	obs_properties_add_group(props, "group_temporal", T("Group.Temporal"), OBS_GROUP_NORMAL, t);
 
 	// --- Status ------------------------------------------------------------
