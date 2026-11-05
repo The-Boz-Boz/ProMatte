@@ -1,8 +1,10 @@
 #include "obs/filter.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <exception>
 
 #include <util/platform.h>
 
@@ -202,9 +204,38 @@ void FilterContext::applyTuning()
 
 namespace {
 
-void *filterCreate(obs_data_t *data, obs_source_t *source)
+// libobs is C: an exception must never unwind into it. The obs_source_info
+// callbacks below are thin wrappers that log and swallow. `lastLogNs` limits
+// per-frame callbacks (tick/render) to one log line per 10 s.
+void reportCallbackException(const char *where, const char *what, std::atomic<uint64_t> *lastLogNs = nullptr)
 {
-	auto *ctx = new FilterContext();
+	if (lastLogNs) {
+		const uint64_t now = os_gettime_ns();
+		const uint64_t last = lastLogNs->load();
+		if (last && now - last < 10000000000ULL)
+			return;
+		lastLogNs->store(now);
+	}
+	PM_LOG_ERROR("%s: unexpected exception: %s", where, what);
+}
+
+template<typename Fn> bool guarded(const char *where, Fn &&fn, std::atomic<uint64_t> *lastLogNs = nullptr) noexcept
+{
+	try {
+		fn();
+		return true;
+	} catch (const std::exception &e) {
+		reportCallbackException(where, e.what(), lastLogNs);
+	} catch (...) {
+		reportCallbackException(where, "unknown exception", lastLogNs);
+	}
+	return false;
+}
+
+void filterDestroy(void *data);
+
+void filterCreateImpl(FilterContext *ctx, obs_data_t *data, obs_source_t *source)
+{
 	ctx->source = source;
 	ctx->settings = settingsLoad(data);
 
@@ -240,10 +271,23 @@ void *filterCreate(obs_data_t *data, obs_source_t *source)
 	ctx->configureWorker();
 	ctx->background.update(ctx->settings, source);
 	PM_LOG_INFO("ProMatte filter created on '%s'", obs_source_get_name(source));
-	return ctx;
 }
 
-void filterDestroy(void *data)
+void *filterCreate(obs_data_t *data, obs_source_t *source)
+{
+	FilterContext *ctx = nullptr;
+	if (guarded("filter_create", [&] {
+		    ctx = new FilterContext();
+		    filterCreateImpl(ctx, data, source);
+	    }))
+		return ctx;
+	// Half-built context: tear down whatever was set up (stops the worker).
+	if (ctx)
+		filterDestroy(ctx);
+	return nullptr;
+}
+
+void filterDestroyImpl(void *data)
 {
 	auto *ctx = static_cast<FilterContext *>(data);
 	if (!ctx)
@@ -261,7 +305,12 @@ void filterDestroy(void *data)
 	delete ctx;
 }
 
-void filterUpdate(void *data, obs_data_t *settings)
+void filterDestroy(void *data)
+{
+	guarded("filter_destroy", [&] { filterDestroyImpl(data); });
+}
+
+void filterUpdateImpl(void *data, obs_data_t *settings)
 {
 	auto *ctx = static_cast<FilterContext *>(data);
 	FilterSettings fresh = settingsLoad(settings);
@@ -282,6 +331,11 @@ void filterUpdate(void *data, obs_data_t *settings)
 		ctx->applyTuning();
 }
 
+void filterUpdate(void *data, obs_data_t *settings)
+{
+	guarded("filter_update", [&] { filterUpdateImpl(data, settings); });
+}
+
 void filterDefaults(obs_data_t *settings)
 {
 	settingsDefaults(settings);
@@ -289,10 +343,13 @@ void filterDefaults(obs_data_t *settings)
 
 obs_properties_t *filterProperties(void *data)
 {
-	return buildProperties(data);
+	obs_properties_t *props = nullptr;
+	if (guarded("filter_properties", [&] { props = buildProperties(data); }) && props)
+		return props;
+	return obs_properties_create(); // never hand OBS a null property list
 }
 
-void filterTick(void *data, float seconds)
+void filterTickImpl(void *data, float seconds)
 {
 	auto *ctx = static_cast<FilterContext *>(data);
 	ctx->background.tick(seconds);
@@ -312,6 +369,12 @@ void filterTick(void *data, float seconds)
 		ctx->worker->setEnabled(rendering);
 		PM_LOG_DEBUG("filter %s -> worker %s", rendering ? "rendering" : "idle", rendering ? "enabled" : "paused");
 	}
+}
+
+void filterTick(void *data, float seconds)
+{
+	static std::atomic<uint64_t> lastLogNs{0};
+	guarded("filter_tick", [&] { filterTickImpl(data, seconds); }, &lastLogNs);
 }
 
 void updateOverlay(FilterContext *ctx, uint32_t w, uint32_t h)
@@ -339,7 +402,7 @@ void updateOverlay(FilterContext *ctx, uint32_t w, uint32_t h)
 	ctx->overlay.setText(text);
 }
 
-void filterRender(void *data, gs_effect_t *)
+void filterRenderImpl(void *data)
 {
 	auto *ctx = static_cast<FilterContext *>(data);
 	obs_source_t *target = obs_filter_get_target(ctx->source);
@@ -458,6 +521,12 @@ void filterRender(void *data, gs_effect_t *)
 	}
 	if (firstRenderOfFrame)
 		ctx->worker->performance().recordRender(sw.elapsedMs());
+}
+
+void filterRender(void *data, gs_effect_t *)
+{
+	static std::atomic<uint64_t> lastLogNs{0};
+	guarded("filter_render", [&] { filterRenderImpl(data); }, &lastLogNs);
 }
 
 uint32_t filterWidth(void *data)

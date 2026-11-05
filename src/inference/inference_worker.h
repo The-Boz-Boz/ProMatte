@@ -130,6 +130,11 @@ private:
 	// Refuses to install a new backend while the worker is being stopped.
 	bool replaceBackend(std::unique_ptr<SegmentationBackend> next);
 	void handleInferenceError(const std::string &error);
+	// Last line of defence for the worker loop: log, drop the backend and recover
+	// through the regular back-off instead of letting the thread die.
+	void handleWorkerException(const char *what) noexcept;
+	// Error log rate limit shared by inference errors and worker exceptions.
+	bool shouldLogError(double now);
 	void tryReinitialize();
 	void updateAiResolution();
 	void processOne(FrameBuffer &frame);

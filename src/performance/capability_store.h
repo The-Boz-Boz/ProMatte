@@ -45,6 +45,9 @@ public:
 private:
 	std::string path_;
 	mutable std::mutex m_;
+	// Serialises save(): snapshot + file write, so an older snapshot can never
+	// overwrite a newer one. Lock order: saveMutex_ before m_.
+	mutable std::mutex saveMutex_;
 	std::map<std::string, std::map<std::string, Record>> data_;
 	mutable bool dirty_ = false;
 };

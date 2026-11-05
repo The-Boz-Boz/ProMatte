@@ -113,6 +113,7 @@ bool CapabilityStore::save() const
 {
 	if (path_.empty())
 		return false;
+	std::lock_guard<std::mutex> saveLock(saveMutex_);
 	json root = json::object();
 	{
 		std::lock_guard<std::mutex> lock(m_);
@@ -133,7 +134,14 @@ bool CapabilityStore::save() const
 	size_t slash = dir.find_last_of("/\\");
 	if (slash != std::string::npos)
 		fs::createDirectories(dir.substr(0, slash));
-	return fs::writeTextFile(path_, root.dump(2));
+	// Device names come from drivers; replace invalid UTF-8 instead of throwing.
+	if (!fs::writeTextFileAtomic(path_, root.dump(2, ' ', false, json::error_handler_t::replace))) {
+		PM_LOG_WARN("capability store: could not write %s", path_.c_str());
+		std::lock_guard<std::mutex> lock(m_);
+		dirty_ = true; // retry on the next save
+		return false;
+	}
+	return true;
 }
 
 void CapabilityStore::clear()

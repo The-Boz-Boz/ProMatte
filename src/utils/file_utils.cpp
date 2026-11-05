@@ -93,6 +93,36 @@ bool writeTextFile(const std::string &path, const std::string &content)
 	return bool(out);
 }
 
+bool writeTextFileAtomic(const std::string &path, const std::string &content)
+{
+	const std::string tmp = path + ".tmp";
+	{
+		std::ofstream out(P(tmp), std::ios::binary | std::ios::trunc);
+		if (!out)
+			return false;
+		out << content;
+		out.close();
+		if (!out) {
+			removeFile(tmp);
+			return false;
+		}
+	}
+#ifdef _WIN32
+	if (!MoveFileExW(toWide(tmp).c_str(), toWide(path).c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+		removeFile(tmp);
+		return false;
+	}
+#else
+	std::error_code ec;
+	stdfs::rename(P(tmp), P(path), ec); // replaces atomically on POSIX
+	if (ec) {
+		removeFile(tmp);
+		return false;
+	}
+#endif
+	return true;
+}
+
 std::string joinPath(const std::string &a, const std::string &b)
 {
 	if (a.empty())

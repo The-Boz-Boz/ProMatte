@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <exception>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -14,6 +15,23 @@
 #include "utils/timer.h"
 
 namespace promatte {
+
+namespace {
+
+// Observers run caller code on the worker thread; an exception there must not
+// take the inference loop down.
+template<typename Fn> void callObserver(const char *name, Fn &&fn)
+{
+	try {
+		fn();
+	} catch (const std::exception &e) {
+		PM_LOG_ERROR("%s observer threw: %s", name, e.what());
+	} catch (...) {
+		PM_LOG_ERROR("%s observer threw an unknown exception", name);
+	}
+}
+
+} // namespace
 
 const char *workerStateName(WorkerState s)
 {
@@ -387,209 +405,215 @@ void InferenceWorker::threadMain()
 #endif
 	PM_LOG_DEBUG("inference worker thread started");
 	while (running_) {
-		// ---- control messages ------------------------------------------------
-		bool haveConfig = false, haveTuning = false, haveSource = false, haveQuality = false, doRelease = false,
-		     doResetTemporal = false;
-		WorkerConfig cfg;
-		TemporalParams tp;
-		RefineParams rp;
-		uint32_t sw = 0, sh = 0;
-		double sfps = 30;
-		QualityMode qm = QualityMode::Auto;
-		int manualTier = -1;
-		{
-			std::unique_lock<std::mutex> lock(ctrlMutex_);
-			bool frameReady = false;
+		try {
+			// ---- control messages ------------------------------------------------
+			bool haveConfig = false, haveTuning = false, haveSource = false, haveQuality = false, doRelease = false,
+			     doResetTemporal = false;
+			WorkerConfig cfg;
+			TemporalParams tp;
+			RefineParams rp;
+			uint32_t sw = 0, sh = 0;
+			double sfps = 30;
+			QualityMode qm = QualityMode::Auto;
+			int manualTier = -1;
 			{
-				std::lock_guard<std::mutex> flock(frameMutex_);
-				frameReady = frameAvailable_;
+				std::unique_lock<std::mutex> lock(ctrlMutex_);
+				bool frameReady = false;
+				{
+					std::lock_guard<std::mutex> flock(frameMutex_);
+					frameReady = frameAvailable_;
+				}
+				if (!configPending_ && !tuningPending_ && !sourcePending_ && !qualityPending_ && !releasePending_ &&
+				    !resetTemporalPending_ && !(frameReady && enabled_)) {
+					cv_.wait_for(lock, std::chrono::milliseconds(50));
+				}
+				if (configPending_) {
+					cfg = pendingConfig_;
+					configPending_ = false;
+					haveConfig = true;
+				}
+				if (tuningPending_) {
+					tp = pendingTemporal_;
+					rp = pendingRefine_;
+					tuningPending_ = false;
+					haveTuning = true;
+				}
+				if (sourcePending_) {
+					sw = pendingSrcW_;
+					sh = pendingSrcH_;
+					sfps = pendingSrcFps_;
+					sourcePending_ = false;
+					haveSource = true;
+				}
+				if (qualityPending_) {
+					qm = pendingQuality_;
+					manualTier = pendingManualTier_;
+					qualityPending_ = false;
+					haveQuality = true;
+				}
+				if (releasePending_) {
+					releasePending_ = false;
+					doRelease = true;
+				}
+				if (resetTemporalPending_) {
+					resetTemporalPending_ = false;
+					doResetTemporal = true;
+				}
 			}
-			if (!configPending_ && !tuningPending_ && !sourcePending_ && !qualityPending_ && !releasePending_ &&
-			    !resetTemporalPending_ && !(frameReady && enabled_)) {
-				cv_.wait_for(lock, std::chrono::milliseconds(50));
+			if (!running_)
+				break;
+			if (doRelease) {
+				replaceBackend(nullptr);
+				config_.model = ModelDescriptor{};
+				config_.modelPath.clear();
+				aiW_ = aiH_ = 0;
+				reinitDueMs_ = -1;
+				consecutiveErrors_ = 0;
+				setState(WorkerState::Idle);
 			}
-			if (configPending_) {
-				cfg = pendingConfig_;
-				configPending_ = false;
-				haveConfig = true;
+			if (haveConfig) {
+				if (haveSource) {
+					cfg.sourceWidth = sw;
+					cfg.sourceHeight = sh;
+					cfg.sourceFps = sfps;
+					haveSource = false;
+				}
+				if (haveTuning) {
+					cfg.temporal = tp;
+					cfg.refine = rp;
+					haveTuning = false;
+				}
+				if (haveQuality) {
+					cfg.quality = qm;
+					cfg.manualTier = manualTier;
+					haveQuality = false;
+				}
+				applyConfigLocked(cfg);
 			}
-			if (tuningPending_) {
-				tp = pendingTemporal_;
-				rp = pendingRefine_;
-				tuningPending_ = false;
-				haveTuning = true;
-			}
-			if (sourcePending_) {
-				sw = pendingSrcW_;
-				sh = pendingSrcH_;
-				sfps = pendingSrcFps_;
-				sourcePending_ = false;
-				haveSource = true;
-			}
-			if (qualityPending_) {
-				qm = pendingQuality_;
-				manualTier = pendingManualTier_;
-				qualityPending_ = false;
-				haveQuality = true;
-			}
-			if (releasePending_) {
-				releasePending_ = false;
-				doRelease = true;
-			}
-			if (resetTemporalPending_) {
-				resetTemporalPending_ = false;
-				doResetTemporal = true;
-			}
-		}
-		if (!running_)
-			break;
-		if (doRelease) {
-			replaceBackend(nullptr);
-			config_.model = ModelDescriptor{};
-			config_.modelPath.clear();
-			aiW_ = aiH_ = 0;
-			reinitDueMs_ = -1;
-			consecutiveErrors_ = 0;
-			setState(WorkerState::Idle);
-		}
-		if (haveConfig) {
-			if (haveSource) {
-				cfg.sourceWidth = sw;
-				cfg.sourceHeight = sh;
-				cfg.sourceFps = sfps;
-				haveSource = false;
-			}
+			// Backend dropped after repeated inference errors: retry once the back-off expires.
+			if (!backend_ && reinitDueMs_ >= 0 && Stopwatch::nowMs() >= reinitDueMs_)
+				tryReinitialize();
 			if (haveTuning) {
-				cfg.temporal = tp;
-				cfg.refine = rp;
-				haveTuning = false;
+				config_.temporal = tp;
+				config_.refine = rp;
+				temporal_.setParams(tp);
 			}
-			if (haveQuality) {
-				cfg.quality = qm;
-				cfg.manualTier = manualTier;
-				haveQuality = false;
+			if (haveSource && (sw != config_.sourceWidth || sh != config_.sourceHeight ||
+					   std::abs(sfps - config_.sourceFps) > 0.5)) {
+				config_.sourceWidth = sw;
+				config_.sourceHeight = sh;
+				config_.sourceFps = sfps;
+				if (backend_) {
+					const bool gpu = backend_->capabilities().isGpu;
+					int keepTier = tier_;
+					perf_.configure(config_.quality, int(config_.model.tiers.size()), sfps, gpu);
+					if (config_.manualTier >= 0)
+						perf_.forceTier(config_.manualTier);
+					else
+						perf_.forceTier(keepTier);
+					int t;
+					if (perf_.pollTierChange(t))
+						tier_ = t;
+					updateAiResolution();
+				}
 			}
-			applyConfigLocked(cfg);
-		}
-		// Backend dropped after repeated inference errors: retry once the back-off expires.
-		if (!backend_ && reinitDueMs_ >= 0 && Stopwatch::nowMs() >= reinitDueMs_)
-			tryReinitialize();
-		if (haveTuning) {
-			config_.temporal = tp;
-			config_.refine = rp;
-			temporal_.setParams(tp);
-		}
-		if (haveSource && (sw != config_.sourceWidth || sh != config_.sourceHeight ||
-				   std::abs(sfps - config_.sourceFps) > 0.5)) {
-			config_.sourceWidth = sw;
-			config_.sourceHeight = sh;
-			config_.sourceFps = sfps;
-			if (backend_) {
-				const bool gpu = backend_->capabilities().isGpu;
-				int keepTier = tier_;
-				perf_.configure(config_.quality, int(config_.model.tiers.size()), sfps, gpu);
-				if (config_.manualTier >= 0)
-					perf_.forceTier(config_.manualTier);
-				else
-					perf_.forceTier(keepTier);
+			if (haveQuality && backend_) {
+				config_.quality = qm;
+				config_.manualTier = manualTier;
+				perf_.setMode(qm);
+				if (manualTier >= 0)
+					perf_.forceTier(manualTier);
 				int t;
-				if (perf_.pollTierChange(t))
+				if (perf_.pollTierChange(t)) {
 					tier_ = t;
-				updateAiResolution();
+					updateAiResolution();
+				}
 			}
-		}
-		if (haveQuality && backend_) {
-			config_.quality = qm;
-			config_.manualTier = manualTier;
-			perf_.setMode(qm);
-			if (manualTier >= 0)
-				perf_.forceTier(manualTier);
-			int t;
-			if (perf_.pollTierChange(t)) {
-				tier_ = t;
-				updateAiResolution();
+			if (doResetTemporal) {
+				temporal_.reset();
+				if (backend_)
+					backend_->resetState();
 			}
-		}
-		if (doResetTemporal) {
-			temporal_.reset();
-			if (backend_)
-				backend_->resetState();
-		}
-		// Adaptive tier changes decided by the performance controller.
-		{
-			int t;
-			if (backend_ && perf_.pollTierChange(t) && t != tier_) {
-				tier_ = t;
-				updateAiResolution();
+			// Adaptive tier changes decided by the performance controller.
+			{
+				int t;
+				if (backend_ && perf_.pollTierChange(t) && t != tier_) {
+					tier_ = t;
+					updateAiResolution();
+				}
 			}
-		}
-		// Automatic model changes (Auto mode only).
-		if (backend_ && config_.modelAutoSelected) {
-			const bool fallback = perf_.pollModelFallback();
-			const bool upgrade = !fallback && perf_.pollModelUpgrade();
-			if (fallback || upgrade) {
-				const ModelDescriptor &target = fallback ? config_.fallbackModel : config_.upgradeModel;
-				const std::string &targetPath = fallback ? config_.fallbackModelPath : config_.upgradeModelPath;
-				if (!target.id.empty() && target.id != config_.model.id && !targetPath.empty()) {
-					// Remember how the outgoing model performed before switching.
-					reportCost(true);
-					PM_LOG_INFO("switching model '%s' -> '%s' (%s)", config_.model.id.c_str(),
-						    target.id.c_str(), fallback ? "too slow" : "headroom available");
-					WorkerConfig cfg = config_;
-					cfg.model = target;
-					cfg.modelPath = targetPath;
-					cfg.fallbackModel = ModelDescriptor{};
-					cfg.fallbackModelPath.clear();
-					cfg.upgradeModel = ModelDescriptor{};
-					cfg.upgradeModelPath.clear();
-					// On failure the current model and backend stay in service.
-					if (applyConfigLocked(cfg, /*keepCurrentOnFailure=*/true)) {
-						{
-							std::lock_guard<std::mutex> lock(statusMutex_);
-							status_.usingFallbackModel = fallback;
+			// Automatic model changes (Auto mode only).
+			if (backend_ && config_.modelAutoSelected) {
+				const bool fallback = perf_.pollModelFallback();
+				const bool upgrade = !fallback && perf_.pollModelUpgrade();
+				if (fallback || upgrade) {
+					const ModelDescriptor &target = fallback ? config_.fallbackModel : config_.upgradeModel;
+					const std::string &targetPath = fallback ? config_.fallbackModelPath : config_.upgradeModelPath;
+					if (!target.id.empty() && target.id != config_.model.id && !targetPath.empty()) {
+						// Remember how the outgoing model performed before switching.
+						reportCost(true);
+						PM_LOG_INFO("switching model '%s' -> '%s' (%s)", config_.model.id.c_str(),
+							    target.id.c_str(), fallback ? "too slow" : "headroom available");
+						WorkerConfig cfg = config_;
+						cfg.model = target;
+						cfg.modelPath = targetPath;
+						cfg.fallbackModel = ModelDescriptor{};
+						cfg.fallbackModelPath.clear();
+						cfg.upgradeModel = ModelDescriptor{};
+						cfg.upgradeModelPath.clear();
+						// On failure the current model and backend stay in service.
+						if (applyConfigLocked(cfg, /*keepCurrentOnFailure=*/true)) {
+							{
+								std::lock_guard<std::mutex> lock(statusMutex_);
+								status_.usingFallbackModel = fallback;
+							}
+							ModelChangeObserver obs;
+							{
+								std::lock_guard<std::mutex> lock(observerMutex_);
+								obs = modelChangeObserver_;
+							}
+							if (obs)
+								callObserver("model change", [&] { obs(target.id); });
 						}
-						ModelChangeObserver obs;
-						{
-							std::lock_guard<std::mutex> lock(observerMutex_);
-							obs = modelChangeObserver_;
-						}
-						if (obs)
-							obs(target.id);
 					}
 				}
 			}
-		}
-		reportCost(false);
-		// GPU contention that survives every cheaper option: hand over to the owner.
-		if (backend_ && backend_->capabilities().isGpu && config_.backend.kind == BackendKind::Auto &&
-		    perf_.pollBackendFallback()) {
-			const auto caps = backend_->capabilities();
-			BackendFallbackObserver obs;
-			{
-				std::lock_guard<std::mutex> lock(observerMutex_);
-				obs = backendFallbackObserver_;
-			}
-			if (obs)
-				obs(caps.deviceName + "|" + caps.name);
-		}
-
-		// ---- frame processing --------------------------------------------------
-		bool got = false;
-		{
-			std::lock_guard<std::mutex> lock(frameMutex_);
-			if (frameAvailable_) {
-				if (enabled_ && backend_) {
-					std::swap(work_, frameSlot_);
-					got = true;
+			reportCost(false);
+			// GPU contention that survives every cheaper option: hand over to the owner.
+			if (backend_ && backend_->capabilities().isGpu && config_.backend.kind == BackendKind::Auto &&
+			    perf_.pollBackendFallback()) {
+				const auto caps = backend_->capabilities();
+				BackendFallbackObserver obs;
+				{
+					std::lock_guard<std::mutex> lock(observerMutex_);
+					obs = backendFallbackObserver_;
 				}
-				frameAvailable_ = false; // drop when disabled / no backend
+				if (obs)
+					callObserver("backend fallback", [&] { obs(caps.deviceName + "|" + caps.name); });
 			}
+
+			// ---- frame processing --------------------------------------------------
+			bool got = false;
+			{
+				std::lock_guard<std::mutex> lock(frameMutex_);
+				if (frameAvailable_) {
+					if (enabled_ && backend_) {
+						std::swap(work_, frameSlot_);
+						got = true;
+					}
+					frameAvailable_ = false; // drop when disabled / no backend
+				}
+			}
+			perf_.recordQueueDepth(0);
+			if (!got)
+				continue;
+			// Throttling happens in wantsFrame(): a frame that was read back is processed.
+			processOne(work_);
+		} catch (const std::exception &e) {
+			handleWorkerException(e.what());
+		} catch (...) {
+			handleWorkerException("unknown exception");
 		}
-		perf_.recordQueueDepth(0);
-		if (!got)
-			continue;
-		// Throttling happens in wantsFrame(): a frame that was read back is processed.
-		processOne(work_);
 	}
 	replaceBackend(nullptr);
 	PM_LOG_DEBUG("inference worker thread exiting");
@@ -601,15 +625,12 @@ void InferenceWorker::handleInferenceError(const std::string &error)
 	// Count the failed attempt as processed so throttling and dt stay sane.
 	lastProcessedMs_ = now;
 	++consecutiveErrors_;
-	if (lastErrorLogMs_ < 0 || now - lastErrorLogMs_ >= kErrorLogIntervalMs) {
+	if (shouldLogError(now)) {
 		if (suppressedErrors_ > 0)
 			PM_LOG_ERROR("inference error: %s (%llu similar errors suppressed)", error.c_str(), suppressedErrors_);
 		else
 			PM_LOG_ERROR("inference error: %s", error.c_str());
-		lastErrorLogMs_ = now;
 		suppressedErrors_ = 0;
-	} else {
-		++suppressedErrors_;
 	}
 	if (consecutiveErrors_ < kErrorsBeforeReset)
 		return;
@@ -623,6 +644,37 @@ void InferenceWorker::handleInferenceError(const std::string &error)
 		    reinitDelayMs_ / 1000.0);
 	consecutiveErrors_ = 0;
 	setState(WorkerState::Error, "inference failed repeatedly (" + error + "); retrying");
+}
+
+bool InferenceWorker::shouldLogError(double now)
+{
+	if (lastErrorLogMs_ < 0 || now - lastErrorLogMs_ >= kErrorLogIntervalMs) {
+		lastErrorLogMs_ = now;
+		return true;
+	}
+	++suppressedErrors_;
+	return false;
+}
+
+void InferenceWorker::handleWorkerException(const char *what) noexcept
+{
+	try {
+		const double now = Stopwatch::nowMs();
+		if (shouldLogError(now)) {
+			PM_LOG_ERROR("inference worker: unexpected exception: %s (%llu errors suppressed)", what,
+				     suppressedErrors_);
+			suppressedErrors_ = 0;
+		}
+		replaceBackend(nullptr);
+		aiW_ = aiH_ = 0;
+		consecutiveErrors_ = 0;
+		// Same back-off as repeated inference errors; nothing to rebuild without a model.
+		reinitDelayMs_ = reinitDelayMs_ <= 0 ? 1000.0 : std::min(reinitDelayMs_ * 2.0, kMaxReinitDelayMs);
+		reinitDueMs_ = config_.modelPath.empty() ? -1 : now + reinitDelayMs_;
+		setState(WorkerState::Error, std::string("internal error: ") + what);
+	} catch (...) {
+		// Nothing sensible left to do; the loop continues and waits for work.
+	}
 }
 
 void InferenceWorker::tryReinitialize()
@@ -669,7 +721,7 @@ void InferenceWorker::reportCost(bool force)
 	if (!obs)
 		return;
 	const auto caps = backend_->capabilities();
-	obs(config_.model.id, caps.deviceName + "|" + caps.name, cost, budget, tier);
+	callObserver("cost", [&] { obs(config_.model.id, caps.deviceName + "|" + caps.name, cost, budget, tier); });
 }
 
 void InferenceWorker::processOne(FrameBuffer &frame)

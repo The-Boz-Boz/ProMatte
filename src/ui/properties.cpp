@@ -1,5 +1,6 @@
 // OBS properties (settings panel) for the ProMatte filter.
 #include <cstdio>
+#include <exception>
 #include <string>
 #include <vector>
 
@@ -18,6 +19,23 @@ namespace promatte {
 namespace {
 
 #define T(key) obs_module_text(key)
+
+// OBS calls property callbacks from C: an exception must not unwind into libobs.
+// Guarded<fn>::call has fn's signature, logs and returns false (no refresh).
+template<auto Fn> struct Guarded;
+template<typename... Args, bool (*Fn)(Args...)> struct Guarded<Fn> {
+	static bool call(Args... args)
+	{
+		try {
+			return Fn(args...);
+		} catch (const std::exception &e) {
+			PM_LOG_ERROR("properties callback: unexpected exception: %s", e.what());
+		} catch (...) {
+			PM_LOG_ERROR("properties callback: unknown exception");
+		}
+		return false;
+	}
+};
 
 void setVisible(obs_properties_t *props, const char *name, bool visible)
 {
@@ -219,7 +237,7 @@ obs_properties_t *buildProperties(void *data)
 							 OBS_COMBO_FORMAT_STRING);
 	for (const auto &p : presetList())
 		obs_property_list_add_string(preset, T(p.localeKey), p.id);
-	obs_property_set_modified_callback(preset, onPresetChanged);
+	obs_property_set_modified_callback(preset, Guarded<onPresetChanged>::call);
 	// Say what the selected preset actually does. Presets tune matte quality and
 	// cost only, so this also states plainly that they never change framing.
 	{
@@ -243,7 +261,7 @@ obs_properties_t *buildProperties(void *data)
 	obs_property_list_add_string(mode, T("Mode.Video"), "video");
 	obs_property_list_add_string(mode, T("Mode.Dim"), "dim");
 	obs_property_list_add_string(mode, T("Mode.Source"), "source");
-	obs_property_set_modified_callback(mode, onModeChanged);
+	obs_property_set_modified_callback(mode, Guarded<onModeChanged>::call);
 	obs_properties_add_color(bg, keys::Color, T("Color"));
 	obs_properties_add_float_slider(bg, keys::ColorOpacity, T("ColorOpacity"), 0.0, 1.0, 0.01);
 	obs_properties_add_path(bg, keys::ImagePath, T("ImagePath"), OBS_PATH_FILE, T("ImageFilter"), nullptr);
@@ -276,7 +294,7 @@ obs_properties_t *buildProperties(void *data)
 	obs_property_list_add_string(quality, T("Quality.Balanced"), "balanced");
 	obs_property_list_add_string(quality, T("Quality.Quality"), "quality");
 	obs_property_list_add_string(quality, T("Quality.Ultra"), "ultra");
-	obs_property_set_modified_callback(quality, onAnyTuningChanged);
+	obs_property_set_modified_callback(quality, Guarded<onAnyTuningChanged>::call);
 	obs_property_t *model = obs_properties_add_list(q, keys::Model, T("Model"), OBS_COMBO_TYPE_LIST,
 							OBS_COMBO_FORMAT_STRING);
 	obs_property_list_add_string(model, T("Model.Auto"), "auto");
@@ -319,7 +337,7 @@ obs_properties_t *buildProperties(void *data)
 	obs_properties_t *e = obs_properties_create();
 	auto slider = [&](obs_properties_t *g, const char *key, const char *label, double lo, double hi) {
 		obs_property_t *p = obs_properties_add_float_slider(g, key, T(label), lo, hi, 0.01);
-		obs_property_set_modified_callback(p, onAnyTuningChanged);
+		obs_property_set_modified_callback(p, Guarded<onAnyTuningChanged>::call);
 		return p;
 	};
 	slider(e, keys::Separation, "Separation", 0.05, 0.95);
@@ -349,7 +367,7 @@ obs_properties_t *buildProperties(void *data)
 	obs_property_text_set_info_type(status, ctx && ctx->worker && ctx->worker->status().state == WorkerState::Error
 							? OBS_TEXT_INFO_ERROR
 							: OBS_TEXT_INFO_NORMAL);
-	obs_properties_add_button2(st, "status_refresh", T("StatusRefresh"), onRefreshClicked, ctx);
+	obs_properties_add_button2(st, "status_refresh", T("StatusRefresh"), Guarded<onRefreshClicked>::call, ctx);
 	obs_properties_add_group(props, "group_status", T("Group.Status"), OBS_GROUP_NORMAL, st);
 
 	// --- Model manager -------------------------------------------------------
@@ -360,18 +378,18 @@ obs_properties_t *buildProperties(void *data)
 		std::string label = ms.desc.displayName + (ms.installed ? " [installed]" : " [not installed]");
 		obs_property_list_add_string(mlist, label.c_str(), ms.desc.id.c_str());
 	}
-	obs_property_set_modified_callback(mlist, onManagedModelChanged);
+	obs_property_set_modified_callback(mlist, Guarded<onManagedModelChanged>::call);
 	obs_property_t *mstatus = obs_properties_add_text(m, "mm_status", "", OBS_TEXT_INFO);
 	if (ctx) {
 		obs_data_t *settings = obs_source_get_settings(ctx->source);
 		obs_property_set_description(mstatus, modelStatusText(mm, obs_data_get_string(settings, keys::ModelToManage)).c_str());
 		obs_data_release(settings);
 	}
-	obs_properties_add_button2(m, "mm_download", T("ModelDownload"), onDownloadClicked, ctx);
-	obs_properties_add_button2(m, "mm_delete", T("ModelDelete"), onDeleteClicked, ctx);
+	obs_properties_add_button2(m, "mm_download", T("ModelDownload"), Guarded<onDownloadClicked>::call, ctx);
+	obs_properties_add_button2(m, "mm_delete", T("ModelDelete"), Guarded<onDeleteClicked>::call, ctx);
 	obs_properties_add_path(m, keys::CustomModelPath, T("CustomModelPath"), OBS_PATH_FILE, T("CustomModelFilter"),
 				nullptr);
-	obs_properties_add_button2(m, "mm_add_custom", T("CustomModelAdd"), onAddCustomClicked, ctx);
+	obs_properties_add_button2(m, "mm_add_custom", T("CustomModelAdd"), Guarded<onAddCustomClicked>::call, ctx);
 	obs_properties_add_group(props, "group_models", T("Group.Models"), OBS_GROUP_NORMAL, m);
 
 	// --- Advanced ------------------------------------------------------------

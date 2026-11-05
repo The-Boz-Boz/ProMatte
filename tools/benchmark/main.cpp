@@ -442,7 +442,7 @@ int main(int argc, char **argv)
 	root["system"] = sys;
 	root["results"] = results;
 	root["version"] = PROMATTE_VERSION;
-	fs::writeTextFile(a.out, root.dump(2));
+	fs::writeTextFile(a.out, root.dump(2, ' ', false, nlohmann::json::error_handler_t::replace));
 	std::fprintf(stderr, "wrote %s\n", a.out.c_str());
 	return 0;
 }
