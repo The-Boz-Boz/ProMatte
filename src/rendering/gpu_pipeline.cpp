@@ -309,6 +309,7 @@ gs_texture_t *GpuPipeline::refineAlpha(const RenderParams &p)
 		setTex(refineFx_, "matte", lowGuide);
 		setVec2(refineFx_, "lowSize", float(matteW_), float(matteH_));
 		setVec2(refineFx_, "lowTexel", 1.f / float(matteW_), 1.f / float(matteH_));
+		setVec2(refineFx_, "guideTexel", 1.f / float(w_), 1.f / float(h_));
 		setFloat(refineFx_, "rangeSigma", p.rangeSigma);
 	});
 	gs_texture_t *alpha = gs_texrender_get_texture(alphaRender_);

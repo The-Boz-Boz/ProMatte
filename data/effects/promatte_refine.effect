@@ -12,6 +12,7 @@ uniform texture2d matte;      // low-resolution guide: rgb = downscaled colour, 
 uniform texture2d guideLow;   // low-resolution colour (only used by the Merge pass)
 uniform float2 lowSize;       // matte texture size in pixels
 uniform float2 lowTexel;      // 1 / lowSize
+uniform float2 guideTexel;    // 1 / full-resolution size (image)
 uniform float  rangeSigma;    // colour similarity sigma (0.05..0.3)
 uniform float2 texel;         // 1 / output size (feather)
 uniform float  radius;        // feather radius in output pixels
@@ -48,11 +49,27 @@ float colourDistance(float3 a, float3 b)
 	return d.r * 0.4 + d.g * 0.45 + d.b * 0.15;
 }
 
+// Guide colour averaged over the pixel's neighbourhood: four bilinear taps at
+// half-texel offsets each average a 2x2 block, together a 3x3 tent centred on
+// the pixel (no half-pixel shift). Sensor noise in the guide drives the range
+// weights, so a single-pixel guide makes the edge flicker from frame to frame;
+// the tent cuts the noise variance to ~0.14 of a single pixel's. The
+// low-resolution guide is an area average anyway, so this also matches it better.
+float3 guideColour(float2 uv)
+{
+	float2 h = guideTexel * 0.5;
+	float3 c = image.Sample(linearSampler, uv + float2(-h.x, -h.y)).rgb;
+	c += image.Sample(linearSampler, uv + float2( h.x, -h.y)).rgb;
+	c += image.Sample(linearSampler, uv + float2(-h.x,  h.y)).rgb;
+	c += image.Sample(linearSampler, uv + float2( h.x,  h.y)).rgb;
+	return c * 0.25;
+}
+
 // One sample per neighbour: the low-resolution texture carries the guide colour
 // in rgb and the matte in a, so colour similarity and alpha come from the same fetch.
 float4 jbu(float2 uv, int r)
 {
-	float3 guide = image.Sample(linearSampler, uv).rgb;
+	float3 guide = guideColour(uv);
 	float2 lowPos = uv * lowSize - 0.5;
 	float2 base = floor(lowPos);
 	float invRange = 1.0 / max(rangeSigma, 0.01);
