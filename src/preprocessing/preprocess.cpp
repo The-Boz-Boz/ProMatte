@@ -159,6 +159,45 @@ void bgraToLuma(const uint8_t *bgra, uint32_t w, uint32_t h, uint32_t stride, ui
 	}
 }
 
+void lumaThumbnail(const uint8_t *bgra, uint32_t w, uint32_t h, uint32_t stride, uint32_t tw, uint32_t th,
+		   uint8_t *out)
+{
+	if (tw == 0 || th == 0)
+		return;
+	if (w == 0 || h == 0) {
+		std::fill_n(out, size_t(tw) * th, uint8_t(0));
+		return;
+	}
+	for (uint32_t ty = 0; ty < th; ++ty) {
+		const uint32_t y0 = uint32_t(uint64_t(ty) * h / th);
+		const uint32_t y1 = std::max(y0 + 1, uint32_t(uint64_t(ty + 1) * h / th));
+		for (uint32_t tx = 0; tx < tw; ++tx) {
+			const uint32_t x0 = uint32_t(uint64_t(tx) * w / tw);
+			const uint32_t x1 = std::max(x0 + 1, uint32_t(uint64_t(tx + 1) * w / tw));
+			uint32_t acc = 0, cnt = 0;
+			for (uint32_t y = y0; y < y1; y += 2) {
+				const uint8_t *row = bgra + size_t(y) * stride;
+				for (uint32_t x = x0; x < x1; x += 2) {
+					const uint8_t *p = row + size_t(x) * 4;
+					acc += (77u * p[2] + 150u * p[1] + 29u * p[0]) >> 8;
+					++cnt;
+				}
+			}
+			out[size_t(ty) * tw + tx] = uint8_t((acc + cnt / 2) / cnt);
+		}
+	}
+}
+
+double meanAbsDiff(const uint8_t *a, const uint8_t *b, size_t n)
+{
+	if (n == 0)
+		return 0.0;
+	uint64_t sum = 0;
+	for (size_t i = 0; i < n; ++i)
+		sum += uint64_t(a[i] > b[i] ? a[i] - b[i] : b[i] - a[i]);
+	return double(sum) / double(n);
+}
+
 void resizeBgra(const uint8_t *src, uint32_t sw, uint32_t sh, uint32_t sstride, uint8_t *dst, uint32_t dw, uint32_t dh)
 {
 	if (dw == 0 || dh == 0 || sw == 0 || sh == 0)

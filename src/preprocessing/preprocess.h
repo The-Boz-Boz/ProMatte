@@ -33,6 +33,15 @@ void bgraToTensorHalf(const uint8_t *bgra, uint32_t w, uint32_t h, uint32_t stri
 // BGRA8 -> 8-bit luma (BT.601), used for motion estimation.
 void bgraToLuma(const uint8_t *bgra, uint32_t w, uint32_t h, uint32_t stride, uint8_t *luma);
 
+// Motion estimation for skipping inference on static frames. Each of the tw x th
+// thumbnail cells is the mean luma (BT.601) of the BGRA pixels it covers,
+// sampled every second pixel in both directions: cheap, and averaging cuts
+// camera noise so that a still scene measures well below a real movement.
+void lumaThumbnail(const uint8_t *bgra, uint32_t w, uint32_t h, uint32_t stride, uint32_t tw, uint32_t th,
+		   uint8_t *out);
+// Mean absolute difference of two luma buffers of n samples, in luma levels (0..255).
+double meanAbsDiff(const uint8_t *a, const uint8_t *b, size_t n);
+
 // Area-averaging (box) downscale for BGRA8; falls back to bilinear when upscaling.
 void resizeBgra(const uint8_t *src, uint32_t sw, uint32_t sh, uint32_t sstride, uint8_t *dst, uint32_t dw, uint32_t dh);
 

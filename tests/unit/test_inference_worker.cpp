@@ -245,3 +245,46 @@ TEST_CASE("RVM FP16 and FP32 exports agree on the CPU backend")
 	for (size_t i = 0; i < o16.alpha.size(); i += 97)
 		CHECK(o16b.alpha[i] == doctest::Approx(o16.alpha[i]).epsilon(1e-3));
 }
+
+TEST_CASE("static frames reuse the previous matte without running the model")
+{
+	ModelDescriptor model;
+	std::string path;
+	if (!loadModel(model, path, "rvm_mobilenetv3")) {
+		MESSAGE("RVM model not downloaded; skipping");
+		return;
+	}
+	InferenceWorker w;
+	w.setMotionSkip(true, 1.5f, 60000.0);
+	w.start();
+	WorkerConfig cfg;
+	cfg.model = model;
+	cfg.modelPath = path;
+	cfg.backend.kind = BackendKind::CPU;
+	cfg.backend.cpuThreads = 2;
+	cfg.sourceWidth = 320;
+	cfg.sourceHeight = 180;
+	w.setConfig(cfg);
+	REQUIRE(waitFor([&] { return w.status().state == WorkerState::Running; }, 15000));
+	uint32_t aw = 0, ah = 0;
+	w.desiredResolution(aw, ah);
+	FrameBuffer f;
+	auto submitAndWait = [&](uint8_t v) {
+		fillFrame(f, aw, ah, v);
+		w.submitFrame(f);
+		// Consumed when the worker has taken it from the slot.
+		REQUIRE(waitFor([&] { return w.wantsFrame(); }, 10000));
+		std::this_thread::sleep_for(std::chrono::milliseconds(50));
+	};
+	submitAndWait(100);
+	REQUIRE(waitFor([&] { return w.stats().framesProcessed == 1; }, 10000));
+	for (int i = 0; i < 4; ++i)
+		submitAndWait(100); // identical: skipped
+	CHECK(w.stats().framesProcessed == 1);
+	submitAndWait(160); // changed: processed
+	CHECK(waitFor([&] { return w.stats().framesProcessed == 2; }, 10000));
+	w.setMotionSkip(false, 1.5f, 60000.0);
+	submitAndWait(160); // identical, but skipping is off
+	CHECK(waitFor([&] { return w.stats().framesProcessed == 3; }, 10000));
+	w.stop();
+}

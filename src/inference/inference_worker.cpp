@@ -132,6 +132,13 @@ void InferenceWorker::setQualityMode(QualityMode mode, int manualTier)
 	qualityPending_ = true;
 }
 
+void InferenceWorker::setMotionSkip(bool enabled, float threshold, double maxStaleMs)
+{
+	skipEnabled_ = enabled;
+	skipThreshold_ = std::max(threshold, 0.f);
+	skipMaxStaleMs_ = std::max(maxStaleMs, 0.0);
+}
+
 void InferenceWorker::setEnabled(bool enabled)
 {
 	enabled_ = enabled;
@@ -258,6 +265,7 @@ void InferenceWorker::updateAiResolution()
 	if (backend_)
 		backend_->resetState();
 	temporal_.reset();
+	thumbRefValid_ = false; // the next frame always runs the model
 	PM_LOG_INFO("AI resolution: %ux%u (tier %d '%s', ratio %.3f) for source %ux%u", w, h, tier_, t.label.c_str(),
 		    t.downsampleRatio, config_.sourceWidth, config_.sourceHeight);
 }
@@ -556,6 +564,7 @@ void InferenceWorker::threadMain()
 			}
 			if (doResetTemporal) {
 				temporal_.reset();
+				thumbRefValid_ = false;
 				if (backend_)
 					backend_->resetState();
 			}
@@ -776,6 +785,16 @@ void InferenceWorker::processOne(FrameBuffer &frame)
 		stride = wantW * 4;
 	}
 
+	// Static scene: keep the previous matte instead of running the model. Not
+	// recorded as an inference, so the performance controller never mistakes a
+	// skipped frame for a fast one; RVM's recurrent state simply sees a longer
+	// gap, as with a dropped frame.
+	const double startMs = Stopwatch::nowMs();
+	if (isStaticFrame(pixels, w, h, stride, startMs)) {
+		logSkipStats(startMs);
+		return;
+	}
+
 	// Preprocess
 	Stopwatch sw;
 	const size_t n = size_t(w) * h;
@@ -816,6 +835,11 @@ void InferenceWorker::processOne(FrameBuffer &frame)
 	const double infMs = sw.elapsedMs();
 	consecutiveErrors_ = 0;
 	reinitDelayMs_ = 0;
+	// This frame is the new reference for the static-scene check.
+	std::swap(thumb_, thumbRef_);
+	thumbRefValid_ = thumbRef_.size() == size_t(kThumbW) * kThumbH;
+	lastInferenceMs_ = startMs;
+	logSkipStats(startMs);
 
 	// Post-process: CPU refinement + temporal stabilisation at AI resolution.
 	sw.reset();
@@ -870,6 +894,40 @@ void InferenceWorker::processOne(FrameBuffer &frame)
 	perf_.recordInference(infMs, preMs, postMs, total.elapsedMs());
 	if (status_.state != WorkerState::Running)
 		setState(WorkerState::Running);
+}
+
+bool InferenceWorker::isStaticFrame(const uint8_t *pixels, uint32_t w, uint32_t h, uint32_t stride, double nowMs)
+{
+	++skipWindowFrames_;
+	if (!skipEnabled_.load()) {
+		thumbRefValid_ = false;
+		return false;
+	}
+	thumb_.resize(size_t(kThumbW) * kThumbH);
+	lumaThumbnail(pixels, w, h, stride, kThumbW, kThumbH, thumb_.data());
+	if (!thumbRefValid_ || thumbRef_.size() != thumb_.size() || lastInferenceMs_ < 0 ||
+	    nowMs - lastInferenceMs_ >= skipMaxStaleMs_.load())
+		return false;
+	if (meanAbsDiff(thumb_.data(), thumbRef_.data(), thumb_.size()) >= double(skipThreshold_.load()))
+		return false;
+	++skipWindowSkipped_;
+	return true;
+}
+
+void InferenceWorker::logSkipStats(double nowMs)
+{
+	if (skipWindowStartMs_ < 0) {
+		skipWindowStartMs_ = nowMs;
+		return;
+	}
+	if (nowMs - skipWindowStartMs_ < kSkipLogIntervalMs)
+		return;
+	if (skipEnabled_.load() && skipWindowFrames_ > 0)
+		PM_LOG_INFO("static-scene skip: %llu of %llu frames reused the previous matte (%.0f%%) in the last %.0f s",
+			    skipWindowSkipped_, skipWindowFrames_, 100.0 * double(skipWindowSkipped_) / double(skipWindowFrames_),
+			    (nowMs - skipWindowStartMs_) / 1000.0);
+	skipWindowStartMs_ = nowMs;
+	skipWindowFrames_ = skipWindowSkipped_ = 0;
 }
 
 } // namespace promatte

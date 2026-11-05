@@ -1,5 +1,6 @@
 #include <doctest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <vector>
@@ -162,4 +163,48 @@ TEST_CASE("bgraToTensorHalf matches bgraToTensor")
 			CHECK(halfToFloat(half[i]) == doctest::Approx(ref[i]).epsilon(1e-3));
 		}
 	}
+}
+
+TEST_CASE("motion estimate: identical frames score 0, a small shift scores above the skip threshold")
+{
+	const uint32_t w = 640, h = 352, tw = 64, th = 36;
+	// Textured frame: soft vertical bars plus a bright square ("a head").
+	auto render = [&](int shiftX, int noise, uint32_t seed) {
+		std::vector<uint8_t> f(size_t(w) * h * 4);
+		for (uint32_t y = 0; y < h; ++y)
+			for (uint32_t x = 0; x < w; ++x) {
+				const int sx = int(x) - shiftX;
+				int v = 60 + int(40.0 * std::sin(sx * 0.05));
+				if (sx > 250 && sx < 390 && y > 80 && y < 260)
+					v = 200;
+				if (noise) {
+					seed = seed * 1664525u + 1013904223u;
+					v += int(seed >> 28) % (2 * noise + 1) - noise;
+				}
+				v = std::clamp(v, 0, 255);
+				uint8_t *p = &f[(size_t(y) * w + x) * 4];
+				p[0] = p[1] = p[2] = uint8_t(v);
+				p[3] = 255;
+			}
+		return f;
+	};
+	std::vector<uint8_t> a(tw * th), b(tw * th);
+	const auto f0 = render(0, 0, 1);
+	lumaThumbnail(f0.data(), w, h, w * 4, tw, th, a.data());
+	lumaThumbnail(f0.data(), w, h, w * 4, tw, th, b.data());
+	CHECK(meanAbsDiff(a.data(), b.data(), a.size()) == 0.0);
+	CHECK(a[size_t(18) * tw + 32] >= 195); // the square, averaged
+	// Sensor-like noise (+-3 levels per pixel) stays well below the default 1.5.
+	const auto n1 = render(0, 3, 7), n2 = render(0, 3, 99);
+	lumaThumbnail(n1.data(), w, h, w * 4, tw, th, a.data());
+	lumaThumbnail(n2.data(), w, h, w * 4, tw, th, b.data());
+	const double noiseDiff = meanAbsDiff(a.data(), b.data(), a.size());
+	CHECK(noiseDiff < 1.0);
+	// The subject moving by 6 px (~1% of the width) is clearly above it.
+	const auto f1 = render(6, 0, 1);
+	lumaThumbnail(f0.data(), w, h, w * 4, tw, th, a.data());
+	lumaThumbnail(f1.data(), w, h, w * 4, tw, th, b.data());
+	const double moveDiff = meanAbsDiff(a.data(), b.data(), a.size());
+	MESSAGE("noise " << noiseDiff << ", 6 px shift " << moveDiff);
+	CHECK(moveDiff > 1.5);
 }

@@ -86,6 +86,11 @@ public:
 	void setTuning(const TemporalParams &temporal, const RefineParams &refine);
 	void setSourceInfo(uint32_t width, uint32_t height, double fps);
 	void setQualityMode(QualityMode mode, int manualTier);
+	// Static-scene skip: a frame whose luma thumbnail differs from the last
+	// inferred frame by less than `threshold` (mean |delta|, 0..255 levels) is not
+	// run through the model, as long as the last real inference is younger than
+	// `maxStaleMs`. The previous matte stays on screen. Hot parameter.
+	void setMotionSkip(bool enabled, float threshold, double maxStaleMs);
 	// When disabled the worker drops incoming frames and idles (no AI cost).
 	void setEnabled(bool enabled);
 	// Release the backend/session (e.g. filter hidden for a long time).
@@ -146,6 +151,10 @@ private:
 	void tryReinitialize();
 	void updateAiResolution();
 	void processOne(FrameBuffer &frame);
+	// True when `pixels` is close enough to the last inferred frame to reuse its
+	// matte. Leaves the frame's thumbnail in thumb_ for processOne.
+	bool isStaticFrame(const uint8_t *pixels, uint32_t w, uint32_t h, uint32_t stride, double nowMs);
+	void logSkipStats(double nowMs);
 	void reportCost(bool force);
 	void setState(WorkerState s, const std::string &error = {});
 
@@ -200,6 +209,18 @@ private:
 	PerformanceController perf_;
 	double lastProcessedMs_ = -1;
 	int tier_ = 0;
+
+	// static-scene skip (setMotionSkip)
+	static constexpr uint32_t kThumbW = 64, kThumbH = 36;
+	static constexpr double kSkipLogIntervalMs = 60000.0;
+	std::atomic<bool> skipEnabled_{true};
+	std::atomic<float> skipThreshold_{1.5f};
+	std::atomic<double> skipMaxStaleMs_{250.0};
+	std::vector<uint8_t> thumb_, thumbRef_; // current frame / last inferred frame
+	bool thumbRefValid_ = false;            // cleared whenever the matte stream restarts
+	double lastInferenceMs_ = -1;
+	double skipWindowStartMs_ = -1;
+	unsigned long long skipWindowFrames_ = 0, skipWindowSkipped_ = 0;
 
 	// error recovery: after kErrorsBeforeReset failed runs in a row the backend is
 	// dropped and re-initialised after 1, 2, 4, ... kMaxReinitDelayMs.

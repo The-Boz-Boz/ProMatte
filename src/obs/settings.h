@@ -35,6 +35,9 @@ constexpr const char *CpuThreads = "cpu_threads";
 constexpr const char *GpuIndex = "gpu_index";
 constexpr const char *ManualTier = "manual_tier";
 constexpr const char *MaxAiFps = "max_ai_fps";
+constexpr const char *MotionSkip = "motion_skip";
+constexpr const char *MotionSkipThreshold = "motion_skip_threshold";
+constexpr const char *MotionSkipMaxStaleMs = "motion_skip_max_stale_ms";
 constexpr const char *Separation = "edge_separation";
 constexpr const char *Smoothness = "edge_smoothness";
 constexpr const char *Feather = "edge_feather";
@@ -73,6 +76,10 @@ struct FilterSettings {
 	int gpuIndex = -1; // -1 = the adapter OBS renders on (or the strongest GPU)
 	int manualTier = -1;
 	int maxAiFps = 0;
+	// Static-scene skip: reuse the last matte while the frame barely changes.
+	bool motionSkip = true;
+	float motionSkipThreshold = 1.5f; // mean |luma delta| of a 64x36 thumbnail, 0..255 levels
+	int motionSkipMaxStaleMs = 250;   // run the model at least this often anyway
 
 	float separation = 0.5f;    // matte threshold
 	float smoothness = 0.35f;   // 0..1 -> softness band
