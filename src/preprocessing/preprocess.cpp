@@ -198,6 +198,68 @@ double meanAbsDiff(const uint8_t *a, const uint8_t *b, size_t n)
 	return double(sum) / double(n);
 }
 
+MotionMeasure measureMotion(const uint8_t *cur, const uint8_t *ref, uint32_t tw, uint32_t th,
+			    const MotionSkipParams &p)
+{
+	MotionMeasure m;
+	const size_t n = size_t(tw) * th;
+	if (n == 0)
+		return m;
+	uint32_t hist[256] = {};
+	for (size_t i = 0; i < n; ++i)
+		++hist[cur[i] > ref[i] ? cur[i] - ref[i] : ref[i] - cur[i]];
+	// Median |delta|: the noise floor shared by most cells.
+	size_t acc = 0;
+	int median = 0;
+	for (; median < 255; ++median) {
+		acc += hist[median];
+		if (acc * 2 > n)
+			break;
+	}
+	m.noise = std::min(float(median), kMotionNoiseCap);
+	const float cellDelta = std::max(p.cellDelta, 0.f);
+	const float cellThr = std::max(cellDelta + 2.f * m.noise, 1.f);
+	const float blockThr = std::max(cellDelta * 0.5f, 1.5f);
+	for (int d = 0; d < 256; ++d)
+		if (float(d) >= cellThr)
+			m.changedCells += int(hist[d]);
+
+	for (uint32_t by = 0; by < th; by += kMotionBlockCells) {
+		const uint32_t y1 = std::min(by + kMotionBlockCells, th);
+		for (uint32_t bx = 0; bx < tw; bx += kMotionBlockCells) {
+			const uint32_t x1 = std::min(bx + kMotionBlockCells, tw);
+			float sum = 0;
+			for (uint32_t y = by; y < y1; ++y)
+				for (uint32_t x = bx; x < x1; ++x) {
+					const size_t i = size_t(y) * tw + x;
+					const float d = float(cur[i] > ref[i] ? cur[i] - ref[i] : ref[i] - cur[i]);
+					sum += std::clamp(d - m.noise, 0.f, cellThr);
+				}
+			m.maxBlock = std::max(m.maxBlock, sum / float((y1 - by) * (x1 - bx)));
+		}
+	}
+	m.moving = m.changedCells >= std::max(p.minChangedCells, 1) || m.maxBlock >= blockThr;
+	return m;
+}
+
+MotionSkipParams motionSkipParamsForSensitivity(int sensitivity)
+{
+	const double s = std::clamp(sensitivity, 0, 100);
+	const double scale = std::exp2((double(kDefaultMotionSensitivity) - s) / 35.0);
+	MotionSkipParams p;
+	p.cellDelta = float(6.0 * scale);
+	p.minChangedCells = std::max(1, int(std::lround(6.0 * scale)));
+	return p;
+}
+
+int motionSensitivityFromLegacyThreshold(double meanLevels)
+{
+	if (!(meanLevels > 0.0))
+		return 100;
+	const double s = double(kDefaultMotionSensitivity) + 35.0 * std::log2(1.5 / meanLevels);
+	return int(std::clamp(std::lround(s), 0L, 100L));
+}
+
 void resizeBgra(const uint8_t *src, uint32_t sw, uint32_t sh, uint32_t sstride, uint8_t *dst, uint32_t dw, uint32_t dh)
 {
 	if (dw == 0 || dh == 0 || sw == 0 || sh == 0)

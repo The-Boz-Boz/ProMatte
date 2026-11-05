@@ -42,6 +42,48 @@ void lumaThumbnail(const uint8_t *bgra, uint32_t w, uint32_t h, uint32_t stride,
 // Mean absolute difference of two luma buffers of n samples, in luma levels (0..255).
 double meanAbsDiff(const uint8_t *a, const uint8_t *b, size_t n);
 
+// Static-scene decision on two luma thumbnails (lumaThumbnail). A mean over the
+// whole thumbnail hides local motion (a hand is 1-2% of the cells), so the test
+// is local: a frame moves when enough cells, or a 4x4-cell block, change by more
+// than the frame's own noise.
+//   noise   = median |delta| over all cells, capped at kMotionNoiseCap. Sensor
+//             noise and a uniform brightness step (auto exposure) shift every
+//             cell alike and land in the median; motion of a minority does not.
+//   changed = cells with |delta| >= cellDelta + 2 * noise
+//   block   = mean of min(max(|delta| - noise, 0), cell threshold) over a 4x4
+//             block of cells; catches low-contrast change spread over an area
+//             (hand over a similar background, a large brightness step). The
+//             per-cell clip keeps one bright cell from tripping it on its own.
+// The frame is static when changed < minChangedCells and every block mean is
+// below max(cellDelta / 2, 1.5).
+struct MotionSkipParams {
+	float cellDelta = 6.f;   // levels above the noise for a cell to count as changed
+	int minChangedCells = 6; // this many changed cells (of 64x36 = 2304) mean motion
+};
+
+struct MotionMeasure {
+	float noise = 0;       // estimated noise floor, levels (capped median |delta|)
+	int changedCells = 0;  // cells over the cell threshold
+	float maxBlock = 0;    // largest clipped block mean, levels
+	bool moving = false;
+};
+
+constexpr float kMotionNoiseCap = 4.f;
+constexpr uint32_t kMotionBlockCells = 4; // block = 4x4 thumbnail cells
+
+MotionMeasure measureMotion(const uint8_t *cur, const uint8_t *ref, uint32_t tw, uint32_t th,
+			    const MotionSkipParams &p);
+
+// UI "motion sensitivity" 0..100 (default 50) -> detector parameters. Each 35
+// points halve (or double) both the cell threshold and the changed-cell count:
+// 0 -> 16 levels / 16 cells, 50 -> 6 / 6, 100 -> ~2.2 / 2.
+constexpr int kDefaultMotionSensitivity = 50;
+MotionSkipParams motionSkipParamsForSensitivity(int sensitivity);
+// Settings migration: the old mean-|delta| threshold (default 1.5 levels) mapped
+// onto the sensitivity scale on the same log curve: 1.5 -> 50, 0.75 -> 85,
+// 3 -> 15, <= 0.5 (or 0 = "only identical frames") -> 100.
+int motionSensitivityFromLegacyThreshold(double meanLevels);
+
 // Area-averaging (box) downscale for BGRA8; falls back to bilinear when upscaling.
 void resizeBgra(const uint8_t *src, uint32_t sw, uint32_t sh, uint32_t sstride, uint8_t *dst, uint32_t dw, uint32_t dh);
 

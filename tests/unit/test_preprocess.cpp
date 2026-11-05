@@ -221,3 +221,175 @@ TEST_CASE("RVM tiers keep their size for a 1280x720 camera")
 		CHECK(h == t[1]);
 	}
 }
+
+namespace {
+
+// 1280x720 camera-like frame for the static-scene detector: soft texture, a
+// bright "head", optional per-pixel noise, a global brightness offset (auto
+// exposure) and a local rectangle brightened by `rectDelta` (a hand).
+struct SceneOptions {
+	int noise = 0;  // uniform +-noise per pixel
+	uint32_t seed = 1;
+	int global = 0; // added to every pixel
+	int rectX = 0, rectY = 0, rectW = 0, rectH = 0, rectDelta = 0;
+};
+
+std::vector<uint8_t> renderScene(uint32_t w, uint32_t h, const SceneOptions &o)
+{
+	std::vector<uint8_t> f(size_t(w) * h * 4);
+	uint32_t seed = o.seed;
+	for (uint32_t y = 0; y < h; ++y)
+		for (uint32_t x = 0; x < w; ++x) {
+			int v = 90 + int(40.0 * std::sin(x * 0.03) * std::cos(y * 0.02));
+			if (x > 500 && x < 780 && y > 120 && y < 520)
+				v = 190;
+			v += o.global;
+			if (int(x) >= o.rectX && int(x) < o.rectX + o.rectW && int(y) >= o.rectY && int(y) < o.rectY + o.rectH)
+				v += o.rectDelta;
+			if (o.noise) {
+				seed = seed * 1664525u + 1013904223u;
+				v += int((seed >> 8) % uint32_t(2 * o.noise + 1)) - o.noise;
+			}
+			v = std::clamp(v, 0, 255);
+			uint8_t *p = &f[(size_t(y) * w + x) * 4];
+			p[0] = p[1] = p[2] = uint8_t(v);
+			p[3] = 255;
+		}
+	return f;
+}
+
+MotionMeasure measureScenes(const SceneOptions &ref, const SceneOptions &cur,
+			    const MotionSkipParams &p = MotionSkipParams{})
+{
+	const uint32_t w = 1280, h = 720, tw = 64, th = 36;
+	std::vector<uint8_t> a(tw * th), b(tw * th);
+	const auto fr = renderScene(w, h, ref), fc = renderScene(w, h, cur);
+	lumaThumbnail(fr.data(), w, h, w * 4, tw, th, a.data());
+	lumaThumbnail(fc.data(), w, h, w * 4, tw, th, b.data());
+	return measureMotion(b.data(), a.data(), tw, th, p);
+}
+
+} // namespace
+
+TEST_CASE("static-scene detector: identical frames are static")
+{
+	const MotionMeasure m = measureScenes(SceneOptions{}, SceneOptions{});
+	CHECK_FALSE(m.moving);
+	CHECK(m.changedCells == 0);
+	CHECK(m.noise == 0.f);
+	CHECK(m.maxBlock == 0.f);
+}
+
+TEST_CASE("static-scene detector: sensor noise is static, also when the noise is strong")
+{
+	SceneOptions a, b;
+	a.noise = b.noise = 3;
+	a.seed = 7;
+	b.seed = 99;
+	MotionMeasure m = measureScenes(a, b);
+	MESSAGE("noise +-3: noise " << m.noise << ", changed " << m.changedCells << ", max block " << m.maxBlock);
+	CHECK_FALSE(m.moving);
+	CHECK(m.changedCells == 0);
+	// Low light: +-20 per pixel (std ~12) still averages out in the cells.
+	a.noise = b.noise = 20;
+	m = measureScenes(a, b);
+	MESSAGE("noise +-20: noise " << m.noise << ", changed " << m.changedCells << ", max block " << m.maxBlock);
+	CHECK_FALSE(m.moving);
+}
+
+TEST_CASE("static-scene detector: a local 100x100 change is motion although the mean barely moves")
+{
+	SceneOptions a, b;
+	a.noise = b.noise = 3;
+	a.seed = 7;
+	b.seed = 99;
+	b.rectX = 913; // off the cell grid on purpose
+	b.rectY = 405;
+	b.rectW = b.rectH = 100;
+	b.rectDelta = 40;
+	const MotionMeasure m = measureScenes(a, b);
+	MESSAGE("100x100 +40: changed " << m.changedCells << ", max block " << m.maxBlock);
+	CHECK(m.moving);
+	CHECK(m.changedCells >= 25);
+	// The old metric: mean |delta| over the thumbnail stays under its 1.5 default.
+	const uint32_t w = 1280, h = 720, tw = 64, th = 36;
+	std::vector<uint8_t> ta(tw * th), tb(tw * th);
+	const auto fa = renderScene(w, h, a), fb = renderScene(w, h, b);
+	lumaThumbnail(fa.data(), w, h, w * 4, tw, th, ta.data());
+	lumaThumbnail(fb.data(), w, h, w * 4, tw, th, tb.data());
+	CHECK(meanAbsDiff(ta.data(), tb.data(), ta.size()) < 1.5);
+
+	// Fingers: 40x40 px, i.e. a few cells.
+	b.rectW = b.rectH = 40;
+	const MotionMeasure f = measureScenes(a, b);
+	MESSAGE("40x40 +40: changed " << f.changedCells << ", max block " << f.maxBlock);
+	CHECK(f.moving);
+	// A single cell-sized blip (20x20, an LED) is not enough on its own.
+	b.rectX = 900;
+	b.rectY = 400;
+	b.rectW = b.rectH = 20;
+	const MotionMeasure blip = measureScenes(a, b);
+	CHECK_FALSE(blip.moving);
+	CHECK(blip.changedCells == 1);
+}
+
+TEST_CASE("static-scene detector: low-contrast change over an area is motion")
+{
+	// A hand over a similar background: +5 over 200x200 px. No cell crosses the
+	// cell threshold, the 4x4-cell block mean does.
+	SceneOptions b;
+	b.rectX = 200;
+	b.rectY = 200;
+	b.rectW = b.rectH = 200;
+	b.rectDelta = 5;
+	const MotionMeasure m = measureScenes(SceneOptions{}, b);
+	MESSAGE("200x200 +5: changed " << m.changedCells << ", max block " << m.maxBlock);
+	CHECK(m.changedCells == 0);
+	CHECK(m.moving);
+}
+
+TEST_CASE("static-scene detector: auto exposure")
+{
+	// Decision: a uniform brightness step is not motion as long as it is small.
+	// It shifts every cell alike, so it lands in the median noise estimate.
+	// Since the reference is the last inferred frame, a continuing exposure ramp
+	// accumulates and, past ~7 levels (noise cap 4 + block threshold 3),
+	// triggers inference; maxStaleMs bounds the rest.
+	SceneOptions a, b;
+	a.noise = b.noise = 3;
+	a.seed = 7;
+	b.seed = 99;
+	b.global = 2;
+	MotionMeasure m = measureScenes(a, b);
+	MESSAGE("+2: noise " << m.noise << ", changed " << m.changedCells << ", max block " << m.maxBlock);
+	CHECK_FALSE(m.moving);
+	b.global = 5;
+	CHECK_FALSE(measureScenes(a, b).moving);
+	b.global = 10; // lights switched on / a large exposure jump
+	m = measureScenes(a, b);
+	MESSAGE("+10: noise " << m.noise << ", changed " << m.changedCells << ", max block " << m.maxBlock);
+	CHECK(m.moving);
+}
+
+TEST_CASE("static-scene detector: sensitivity scale and legacy threshold migration")
+{
+	const MotionSkipParams def = motionSkipParamsForSensitivity(kDefaultMotionSensitivity);
+	CHECK(def.cellDelta == doctest::Approx(6.f));
+	CHECK(def.minChangedCells == 6);
+	const MotionSkipParams lo = motionSkipParamsForSensitivity(0);
+	const MotionSkipParams hi = motionSkipParamsForSensitivity(100);
+	CHECK(lo.cellDelta == doctest::Approx(16.1f).epsilon(0.01));
+	CHECK(lo.minChangedCells == 16);
+	CHECK(hi.cellDelta == doctest::Approx(2.23f).epsilon(0.01));
+	CHECK(hi.minChangedCells == 2);
+	CHECK(motionSkipParamsForSensitivity(-5).minChangedCells == lo.minChangedCells);
+	CHECK(motionSkipParamsForSensitivity(500).minChangedCells == hi.minChangedCells);
+
+	CHECK(motionSensitivityFromLegacyThreshold(1.5) == 50);
+	CHECK(motionSensitivityFromLegacyThreshold(0.75) == 85);
+	CHECK(motionSensitivityFromLegacyThreshold(3.0) == 15);
+	CHECK(motionSensitivityFromLegacyThreshold(0.0) == 100);
+	CHECK(motionSensitivityFromLegacyThreshold(0.1) == 100);
+	CHECK(motionSensitivityFromLegacyThreshold(10.0) == 0);
+	CHECK(motionSensitivityFromLegacyThreshold(-1.0) == 100);
+}

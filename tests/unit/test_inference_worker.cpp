@@ -268,7 +268,7 @@ TEST_CASE("static frames reuse the previous matte without running the model")
 		return;
 	}
 	InferenceWorker w;
-	w.setMotionSkip(true, 1.5f, 60000.0);
+	w.setMotionSkip(true, MotionSkipParams{}, 60000.0);
 	w.start();
 	WorkerConfig cfg;
 	cfg.model = model;
@@ -296,7 +296,7 @@ TEST_CASE("static frames reuse the previous matte without running the model")
 	CHECK(w.stats().framesProcessed == 1);
 	submitAndWait(160); // changed: processed
 	CHECK(waitFor([&] { return w.stats().framesProcessed == 2; }, 10000));
-	w.setMotionSkip(false, 1.5f, 60000.0);
+	w.setMotionSkip(false, MotionSkipParams{}, 60000.0);
 	submitAndWait(160); // identical, but skipping is off
 	CHECK(waitFor([&] { return w.stats().framesProcessed == 3; }, 10000));
 	w.stop();
@@ -330,7 +330,7 @@ TEST_CASE("synchronous matte: the matte returned belongs to the submitted frame"
 		return;
 	}
 	InferenceWorker w;
-	w.setMotionSkip(true, 1.5f, 60000.0);
+	w.setMotionSkip(true, MotionSkipParams{}, 60000.0);
 	w.start();
 	WorkerConfig cfg;
 	cfg.model = model;

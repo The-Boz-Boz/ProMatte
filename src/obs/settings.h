@@ -6,6 +6,7 @@
 
 #include "performance/performance_controller.h"
 #include "postprocessing/matte_refine.h"
+#include "preprocessing/preprocess.h"
 #include "temporal/temporal_stabilizer.h"
 
 namespace promatte {
@@ -36,7 +37,10 @@ constexpr const char *GpuIndex = "gpu_index";
 constexpr const char *ManualTier = "manual_tier";
 constexpr const char *MaxAiFps = "max_ai_fps";
 constexpr const char *MotionSkip = "motion_skip";
+// Legacy (<= 1.0.2): mean |luma delta| threshold. Read once and migrated to
+// MotionSkipSensitivity by settingsLoad; no longer shown in the UI.
 constexpr const char *MotionSkipThreshold = "motion_skip_threshold";
+constexpr const char *MotionSkipSensitivity = "motion_skip_sensitivity";
 constexpr const char *MotionSkipMaxStaleMs = "motion_skip_max_stale_ms";
 constexpr const char *SyncMatte = "sync_matte";
 constexpr const char *SyncMatteTimeoutMs = "sync_matte_timeout_ms";
@@ -80,8 +84,8 @@ struct FilterSettings {
 	int maxAiFps = 0;
 	// Static-scene skip: reuse the last matte while the frame barely changes.
 	bool motionSkip = true;
-	float motionSkipThreshold = 1.5f; // mean |luma delta| of a 64x36 thumbnail, 0..255 levels
-	int motionSkipMaxStaleMs = 250;   // run the model at least this often anyway
+	int motionSkipSensitivity = kDefaultMotionSensitivity; // 0..100, see motionSkipParamsForSensitivity
+	int motionSkipMaxStaleMs = 150; // run the model at least this often anyway
 	// Synchronous matte: the render thread waits for the matte of the frame it is
 	// drawing (bounded by syncMatteTimeoutMs and 90% of the frame interval)
 	// instead of drawing the newest matte of an older frame.
@@ -111,6 +115,7 @@ struct FilterSettings {
 	// Derived parameter sets for the core layers.
 	RefineParams refineParams() const;
 	TemporalParams temporalParams() const;
+	MotionSkipParams motionSkipParams() const { return motionSkipParamsForSensitivity(motionSkipSensitivity); }
 	float featherPixels(uint32_t outputHeight) const;
 };
 

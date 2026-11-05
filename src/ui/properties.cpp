@@ -427,7 +427,9 @@ obs_properties_t *buildProperties(void *data)
 	obs_properties_add_int(a, keys::ManualTier, T("ManualTier"), -1, 8, 1);
 	obs_properties_add_int(a, keys::MaxAiFps, T("MaxAiFps"), 0, 120, 1);
 	obs_properties_add_bool(a, keys::MotionSkip, T("MotionSkip"));
-	obs_properties_add_float_slider(a, keys::MotionSkipThreshold, T("MotionSkipThreshold"), 0.0, 10.0, 0.1);
+	obs_property_t *sens =
+		obs_properties_add_int_slider(a, keys::MotionSkipSensitivity, T("MotionSkipSensitivity"), 0, 100, 1);
+	obs_property_set_long_description(sens, T("MotionSkipSensitivity.Description"));
 	obs_properties_add_int(a, keys::MotionSkipMaxStaleMs, T("MotionSkipMaxStaleMs"), 0, 2000, 10);
 	obs_properties_add_bool(a, keys::SyncMatte, T("SyncMatte"));
 	obs_properties_add_int(a, keys::SyncMatteTimeoutMs, T("SyncMatteTimeoutMs"), 1, 200, 1);

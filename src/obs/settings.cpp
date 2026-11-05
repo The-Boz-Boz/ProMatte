@@ -135,8 +135,8 @@ void settingsDefaults(obs_data_t *d)
 	obs_data_set_default_int(d, keys::ManualTier, -1);
 	obs_data_set_default_int(d, keys::MaxAiFps, 0);
 	obs_data_set_default_bool(d, keys::MotionSkip, true);
-	obs_data_set_default_double(d, keys::MotionSkipThreshold, 1.5);
-	obs_data_set_default_int(d, keys::MotionSkipMaxStaleMs, 250);
+	obs_data_set_default_int(d, keys::MotionSkipSensitivity, kDefaultMotionSensitivity);
+	obs_data_set_default_int(d, keys::MotionSkipMaxStaleMs, 150);
 	obs_data_set_default_bool(d, keys::SyncMatte, true);
 	obs_data_set_default_int(d, keys::SyncMatteTimeoutMs, 45);
 	obs_data_set_default_double(d, keys::Separation, 0.5);
@@ -179,7 +179,14 @@ FilterSettings settingsLoad(obs_data_t *d)
 	s.manualTier = int(std::clamp<long long>(obs_data_get_int(d, keys::ManualTier), -1, 16));
 	s.maxAiFps = int(std::clamp<long long>(obs_data_get_int(d, keys::MaxAiFps), 0, 120));
 	s.motionSkip = obs_data_get_bool(d, keys::MotionSkip);
-	s.motionSkipThreshold = float(std::clamp(obs_data_get_double(d, keys::MotionSkipThreshold), 0.0, 20.0));
+	// Migration: a threshold the user set in an older version becomes the
+	// equivalent sensitivity, stored once so the UI shows it; the old key is
+	// left in place (ignored) so a downgrade still finds its value.
+	if (!obs_data_has_user_value(d, keys::MotionSkipSensitivity) &&
+	    obs_data_has_user_value(d, keys::MotionSkipThreshold))
+		obs_data_set_int(d, keys::MotionSkipSensitivity,
+				 motionSensitivityFromLegacyThreshold(obs_data_get_double(d, keys::MotionSkipThreshold)));
+	s.motionSkipSensitivity = int(std::clamp<long long>(obs_data_get_int(d, keys::MotionSkipSensitivity), 0, 100));
 	s.motionSkipMaxStaleMs = int(std::clamp<long long>(obs_data_get_int(d, keys::MotionSkipMaxStaleMs), 0, 2000));
 	s.syncMatte = obs_data_get_bool(d, keys::SyncMatte);
 	s.syncMatteTimeoutMs = int(std::clamp<long long>(obs_data_get_int(d, keys::SyncMatteTimeoutMs), 1, 200));

@@ -188,10 +188,11 @@ void InferenceWorker::setQualityMode(QualityMode mode, int manualTier)
 	qualityPending_ = true;
 }
 
-void InferenceWorker::setMotionSkip(bool enabled, float threshold, double maxStaleMs)
+void InferenceWorker::setMotionSkip(bool enabled, const MotionSkipParams &params, double maxStaleMs)
 {
 	skipEnabled_ = enabled;
-	skipThreshold_ = std::max(threshold, 0.f);
+	skipCellDelta_ = std::max(params.cellDelta, 0.f);
+	skipMinCells_ = std::max(params.minChangedCells, 1);
 	skipMaxStaleMs_ = std::max(maxStaleMs, 0.0);
 }
 
@@ -994,11 +995,20 @@ bool InferenceWorker::isStaticFrame(const uint8_t *pixels, uint32_t w, uint32_t 
 	}
 	thumb_.resize(size_t(kThumbW) * kThumbH);
 	lumaThumbnail(pixels, w, h, stride, kThumbW, kThumbH, thumb_.data());
-	if (!thumbRefValid_ || thumbRef_.size() != thumb_.size() || lastInferenceMs_ < 0 ||
-	    nowMs - lastInferenceMs_ >= skipMaxStaleMs_.load())
+	if (!thumbRefValid_ || thumbRef_.size() != thumb_.size() || lastInferenceMs_ < 0)
 		return false;
-	if (meanAbsDiff(thumb_.data(), thumbRef_.data(), thumb_.size()) >= double(skipThreshold_.load()))
+	MotionSkipParams p;
+	p.cellDelta = skipCellDelta_.load();
+	p.minChangedCells = skipMinCells_.load();
+	const MotionMeasure m = measureMotion(thumb_.data(), thumbRef_.data(), kThumbW, kThumbH, p);
+	skipWindowNoiseSum_ += m.noise;
+	++skipWindowMeasured_;
+	if (m.moving)
 		return false;
+	if (nowMs - lastInferenceMs_ >= skipMaxStaleMs_.load()) {
+		++skipWindowStale_; // still, but the matte is due for a refresh
+		return false;
+	}
 	++skipWindowSkipped_;
 	return true;
 }
@@ -1012,11 +1022,16 @@ void InferenceWorker::logSkipStats(double nowMs)
 	if (nowMs - skipWindowStartMs_ < kSkipLogIntervalMs)
 		return;
 	if (skipEnabled_.load() && skipWindowFrames_ > 0)
-		PM_LOG_INFO("static-scene skip: %llu of %llu frames reused the previous matte (%.0f%%) in the last %.0f s",
+		PM_LOG_INFO("static-scene skip: %llu of %llu frames reused the previous matte (%.0f%%) in the last %.0f s; "
+			    "%llu still frames refreshed by max stale %.0f ms; noise %.1f levels, cell threshold %.1f "
+			    "levels over noise, %d cells",
 			    skipWindowSkipped_, skipWindowFrames_, 100.0 * double(skipWindowSkipped_) / double(skipWindowFrames_),
-			    (nowMs - skipWindowStartMs_) / 1000.0);
+			    (nowMs - skipWindowStartMs_) / 1000.0, skipWindowStale_, skipMaxStaleMs_.load(),
+			    skipWindowMeasured_ ? skipWindowNoiseSum_ / double(skipWindowMeasured_) : 0.0,
+			    double(skipCellDelta_.load()), skipMinCells_.load());
 	skipWindowStartMs_ = nowMs;
-	skipWindowFrames_ = skipWindowSkipped_ = 0;
+	skipWindowFrames_ = skipWindowSkipped_ = skipWindowStale_ = skipWindowMeasured_ = 0;
+	skipWindowNoiseSum_ = 0;
 }
 
 } // namespace promatte

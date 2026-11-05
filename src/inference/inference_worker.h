@@ -12,6 +12,7 @@
 #include "inference/segmentation_backend.h"
 #include "performance/performance_controller.h"
 #include "postprocessing/matte_refine.h"
+#include "preprocessing/preprocess.h"
 #include "temporal/temporal_stabilizer.h"
 
 namespace promatte {
@@ -97,11 +98,13 @@ public:
 	void setTuning(const TemporalParams &temporal, const RefineParams &refine);
 	void setSourceInfo(uint32_t width, uint32_t height, double fps);
 	void setQualityMode(QualityMode mode, int manualTier);
-	// Static-scene skip: a frame whose luma thumbnail differs from the last
-	// inferred frame by less than `threshold` (mean |delta|, 0..255 levels) is not
-	// run through the model, as long as the last real inference is younger than
-	// `maxStaleMs`. The previous matte stays on screen. Hot parameter.
-	void setMotionSkip(bool enabled, float threshold, double maxStaleMs);
+	// Static-scene skip: a frame whose luma thumbnail shows no local motion
+	// against the last inferred frame (measureMotion with `params`) is not run
+	// through the model, as long as the last real inference is younger than
+	// `maxStaleMs`. The previous matte stays on screen. Comparing with the last
+	// inferred frame, not the previous one, lets slow drift accumulate until it
+	// counts as motion. Hot parameter.
+	void setMotionSkip(bool enabled, const MotionSkipParams &params, double maxStaleMs);
 	// Whether mattes need the model's foreground colour (RVM fgr). Hot parameter.
 	void setNeedForeground(bool need) { needForeground_ = need; }
 	// When disabled the worker drops incoming frames and idles (no AI cost).
@@ -250,13 +253,17 @@ private:
 	static constexpr double kSkipLogIntervalMs = 60000.0;
 	std::atomic<bool> needForeground_{true};
 	std::atomic<bool> skipEnabled_{true};
-	std::atomic<float> skipThreshold_{1.5f};
-	std::atomic<double> skipMaxStaleMs_{250.0};
+	std::atomic<float> skipCellDelta_{MotionSkipParams{}.cellDelta};
+	std::atomic<int> skipMinCells_{MotionSkipParams{}.minChangedCells};
+	std::atomic<double> skipMaxStaleMs_{150.0};
 	std::vector<uint8_t> thumb_, thumbRef_; // current frame / last inferred frame
 	bool thumbRefValid_ = false;            // cleared whenever the matte stream restarts
 	double lastInferenceMs_ = -1;
 	double skipWindowStartMs_ = -1;
 	unsigned long long skipWindowFrames_ = 0, skipWindowSkipped_ = 0;
+	unsigned long long skipWindowStale_ = 0; // frames that looked static but hit maxStaleMs
+	double skipWindowNoiseSum_ = 0;          // sum of measured noise floors, for the log
+	unsigned long long skipWindowMeasured_ = 0;
 
 	// error recovery: after kErrorsBeforeReset failed runs in a row the backend is
 	// dropped and re-initialised after 1, 2, 4, ... kMaxReinitDelayMs.
