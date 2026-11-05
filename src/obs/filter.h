@@ -33,6 +33,7 @@ struct FilterContext {
 
 	FrameBuffer frame; // reusable buffer handed to the worker
 	MatteBuffer matte; // latest matte taken from the worker
+	// Written by video_render and read by configureWorker, both on the graphics thread.
 	uint32_t lastW = 0, lastH = 0;
 	double lastFps = 0;
 	uint64_t lastRenderNs = 0;
@@ -46,9 +47,13 @@ struct FilterContext {
 	std::string deviceKey;         // capability-store key for the active backend
 	std::atomic<bool> modelChangedByWorker{false};
 	std::atomic<bool> forceCpuBackend{false}; // set when GPU inference starved OBS rendering
+	// Set from any thread (UI, worker); filterTick runs configureWorker() for it.
+	std::atomic<bool> reconfigureRequested{false};
 
 	std::string statusText(bool multiline) const;
-	void configureWorker();
+	// Graphics thread (video_tick) or filter_create only: the fields above are not
+	// synchronised. `modelOverride` keeps the model the worker switched to itself.
+	void configureWorker(const std::string &modelOverride = {});
 	void applyTuning();
 };
 

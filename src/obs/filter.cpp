@@ -108,7 +108,7 @@ std::string FilterContext::statusText(bool multiline) const
 	return out;
 }
 
-void FilterContext::configureWorker()
+void FilterContext::configureWorker(const std::string &modelOverride)
 {
 	if (!worker)
 		return;
@@ -147,8 +147,12 @@ void FilterContext::configureWorker()
 	if (!gpuBackend)
 		deviceName = sysinfo::cpuName();
 	deviceKey = deviceName + "|" + backendKindName(effective);
-	std::string modelId = resolveModelId(s, gpuBackend, deviceKey);
 	ModelManager &mm = modelManager();
+	// The worker switched models on its own (Auto): keep its choice and only
+	// refresh the fallback/upgrade candidates around it.
+	std::string modelId = !modelOverride.empty() && s.modelId == "auto" && mm.isInstalled(modelOverride)
+				      ? modelOverride
+				      : resolveModelId(s, gpuBackend, deviceKey);
 	if (!modelId.empty()) {
 		auto d = mm.find(modelId);
 		if (d) {
@@ -229,7 +233,7 @@ void *filterCreate(obs_data_t *data, obs_source_t *source)
 		for (int i = 0; i < CapabilityStore::kSlowStrikes; ++i)
 			capabilityStore().record(deviceKey, "__backend__", 1e6, 1.0);
 		ctx->forceCpuBackend = true;
-		ctx->configureWorker(); // posts a new config; the worker applies it after this call returns
+		ctx->reconfigureRequested = true; // applied by filterTick on the graphics thread
 	});
 	ctx->worker->start();
 	ctx->lastFps = sourceFps();
@@ -273,7 +277,7 @@ void filterUpdate(void *data, obs_data_t *settings)
 				 fresh.gpuIndex != old.gpuIndex ||
 				 (ctx->worker && ctx->worker->status().state == WorkerState::NoModel);
 	if (reconfigure)
-		ctx->configureWorker();
+		ctx->reconfigureRequested = true; // applied by filterTick on the graphics thread
 	else
 		ctx->applyTuning();
 }
@@ -292,6 +296,13 @@ void filterTick(void *data, float seconds)
 {
 	auto *ctx = static_cast<FilterContext *>(data);
 	ctx->background.tick(seconds);
+	// All (re)configuration happens here, on the graphics thread: requests from the
+	// UI, filter_update and the worker thread only raise flags.
+	const bool modelChanged = ctx->modelChangedByWorker.exchange(false);
+	if (ctx->reconfigureRequested.exchange(false))
+		ctx->configureWorker();
+	else if (modelChanged && ctx->worker)
+		ctx->configureWorker(ctx->worker->status().modelId);
 	// Requirement E: when the filter is disabled OBS stops calling video_render;
 	// detect that and idle the worker so no AI work happens.
 	const uint64_t now = os_gettime_ns();

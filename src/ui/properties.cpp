@@ -161,7 +161,7 @@ bool onDeleteClicked(obs_properties_t *props, obs_property_t *, void *data)
 		PM_LOG_WARN("delete '%s': %s", id.c_str(), err.c_str());
 	refreshModelStatus(props, settings);
 	obs_data_release(settings);
-	ctx->configureWorker();
+	ctx->reconfigureRequested = true; // applied by filterTick on the graphics thread
 	return true;
 }
 
