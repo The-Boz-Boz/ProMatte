@@ -197,3 +197,20 @@ TEST_CASE("RVM tiers follow the RVM inference guide for both precisions")
 	}
 	CHECK(seen == 2); // rvm_mobilenetv3 (FP32) and rvm_mobilenetv3_fp16
 }
+
+TEST_CASE("shipped manifest: matting vs segmentation models")
+{
+	std::string text;
+	REQUIRE(fs::readTextFile(fs::joinPath(PROMATTE_SOURCE_DIR, "data/models/manifest.json"), text));
+	std::vector<ModelDescriptor> models;
+	std::string err;
+	REQUIRE_MESSAGE(parseModelManifest(text, models, err), err);
+	for (const auto &m : models) {
+		CAPTURE(m.id);
+		const bool matting = m.family == "rvm" || m.family == "modnet";
+		CHECK(m.isAlphaMatting() == matting);
+	}
+	ModelDescriptor custom;
+	custom.family = "custom";
+	CHECK(custom.isAlphaMatting());
+}

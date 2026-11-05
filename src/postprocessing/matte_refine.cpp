@@ -11,10 +11,23 @@ void MatteRefiner::process(float *alpha, uint32_t w, uint32_t h, const RefinePar
 	if (n == 0)
 		return;
 	if (p.minComponentArea > 0.f || p.maxHoleArea > 0.f)
-		filterComponents(alpha, w, h, p.minComponentArea, p.maxHoleArea);
+		filterComponents(alpha, w, h, p.minComponentArea, p.maxHoleArea,
+				 p.alphaMatting ? kMattingHoleKeepAlpha : 0.f);
 	if (p.shiftPixels != 0)
 		morphShift(alpha, w, h, p.shiftPixels);
-	applyConfidenceCurve(alpha, n, p.threshold, p.softness);
+	if (p.alphaMatting)
+		applyMatteTails(alpha, n, p.matteLo, p.matteHi);
+	else
+		applyConfidenceCurve(alpha, n, p.threshold, p.softness);
+}
+
+void MatteRefiner::applyMatteTails(float *alpha, size_t n, float lo, float hi)
+{
+	lo = std::clamp(lo, 0.f, 0.45f);
+	hi = std::clamp(hi, 0.55f, 1.f);
+	const float inv = 1.f / (hi - lo);
+	for (size_t i = 0; i < n; ++i)
+		alpha[i] = std::clamp((alpha[i] - lo) * inv, 0.f, 1.f);
 }
 
 void MatteRefiner::applyConfidenceCurve(float *alpha, size_t n, float threshold, float softness)
@@ -71,7 +84,8 @@ void MatteRefiner::morphShift(float *alpha, uint32_t w, uint32_t h, int shiftPix
 	}
 }
 
-int MatteRefiner::filterComponents(float *alpha, uint32_t w, uint32_t h, float minComponentArea, float maxHoleArea)
+int MatteRefiner::filterComponents(float *alpha, uint32_t w, uint32_t h, float minComponentArea, float maxHoleArea,
+				   float holeKeepAlpha)
 {
 	const size_t n = size_t(w) * h;
 	labels_.assign(n, 0);
@@ -82,8 +96,10 @@ int MatteRefiner::filterComponents(float *alpha, uint32_t w, uint32_t h, float m
 	// components negative ids. We record area and border contact per component.
 	std::vector<uint32_t> areas;
 	std::vector<uint8_t> touchesBorder;
+	std::vector<float> alphaSum; // per component, for the hole alpha test
 	areas.push_back(0); // index 0 unused
 	touchesBorder.push_back(0);
+	alphaSum.push_back(0.f);
 
 	auto isFg = [&](size_t i) { return alpha[i] > 0.5f; };
 
@@ -95,12 +111,14 @@ int MatteRefiner::filterComponents(float *alpha, uint32_t w, uint32_t h, float m
 		const int id = nextId++;
 		areas.push_back(0);
 		touchesBorder.push_back(0);
+		alphaSum.push_back(0.f);
 		stack_.push_back(uint32_t(start));
 		labels_[start] = fg ? id : -id;
 		while (!stack_.empty()) {
 			uint32_t i = stack_.back();
 			stack_.pop_back();
 			++areas[size_t(id)];
+			alphaSum[size_t(id)] += alpha[i];
 			uint32_t x = i % w, y = i / w;
 			if (x == 0 || y == 0 || x == w - 1 || y == h - 1)
 				touchesBorder[size_t(id)] = 1;
@@ -141,7 +159,9 @@ int MatteRefiner::filterComponents(float *alpha, uint32_t w, uint32_t h, float m
 				++removed;
 			}
 		} else {
-			if (maxHoleArea > 0.f && !touchesBorder[size_t(id)] && frac < maxHoleArea)
+			const float meanAlpha = alphaSum[size_t(id)] / float(std::max<uint32_t>(areas[size_t(id)], 1));
+			if (maxHoleArea > 0.f && !touchesBorder[size_t(id)] && frac < maxHoleArea &&
+			    !(holeKeepAlpha > 0.f && meanAlpha < holeKeepAlpha))
 				flip[size_t(id)] = 1;
 		}
 	}

@@ -8,6 +8,13 @@ namespace promatte {
 
 using json = nlohmann::json;
 
+bool ModelDescriptor::isAlphaMatting() const
+{
+	if (recurrent || providesForeground)
+		return true;
+	return family == "rvm" || family == "modnet" || family == "custom";
+}
+
 const ResolutionTier &ModelDescriptor::tier(size_t index) const
 {
 	static const ResolutionTier empty{};

@@ -73,6 +73,12 @@ struct ModelDescriptor {
 	bool recommendedForCpu = false;
 	bool recommendedForGpu = false;
 
+	// True for alpha-matting networks (RVM, MODNet, custom MODNet-style models):
+	// their output is a real alpha with semi-transparent hair, not a class
+	// probability, so the refinement must keep the mid-range instead of
+	// thresholding it. Segmentation models (MediaPipe, PP-HumanSeg) are false.
+	bool isAlphaMatting() const;
+
 	const ResolutionTier &tier(size_t index) const;
 	size_t tierCount() const { return tiers.size(); }
 	uint32_t alignDim(uint32_t v) const;

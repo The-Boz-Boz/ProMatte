@@ -217,6 +217,14 @@ RefineParams FilterSettings::refineParams() const
 	// smoothness 0 -> hard 0.02 band, 1 -> wide 0.45 band (keeps hair semi-transparency)
 	p.softness = 0.02f + 0.43f * smoothness;
 	p.shiftPixels = int(std::lround(shift * 4.0f));
+	// Alpha-matting models: the separation slider moves the background tail cut
+	// instead of the threshold. 0.05 -> 0.02, 0.5 (default) -> 0.04, 0.95 -> 0.15:
+	// gentle below the default (keeps the faintest hair), stronger above it
+	// (cuts a background haze the model leaves).
+	p.matteLo = separation <= 0.5f ? 0.02f + (separation - 0.05f) * (0.02f / 0.45f)
+				       : 0.04f + (separation - 0.5f) * (0.11f / 0.45f);
+	p.matteLo = std::clamp(p.matteLo, 0.02f, 0.15f);
+	p.matteHi = 0.96f;
 	p.minComponentArea = removeBlobs ? 0.004f : 0.f;
 	p.maxHoleArea = fillHoles ? 0.002f : 0.f;
 	return p;
