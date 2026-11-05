@@ -14,6 +14,13 @@
 #include "utils/logging.h"
 #include "utils/system_info.h"
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE("promatte", "en-US")
 
@@ -29,6 +36,40 @@ void obsLogSink(log::Level level, const char *message)
 	int lvl = level == log::Level::Error ? LOG_ERROR : level == log::Level::Warning ? LOG_WARNING : level == log::Level::Info ? LOG_INFO : LOG_DEBUG;
 	blog(lvl, "[promatte] %s", message);
 }
+
+#ifdef _WIN32
+// ONNX Runtime delay-loads DirectML.dll by bare name. Once the plugin is loaded
+// its directory is no longer on the search path, so Windows would hand out
+// System32\DirectML.dll (the OS copy) or whatever another plugin loaded first.
+// Load the copy that ships next to promatte.dll up front so the bare-name lookup
+// resolves to it, and log which file is actually in use.
+void preloadDirectML()
+{
+	HMODULE self = nullptr;
+	if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+				reinterpret_cast<LPCWSTR>(&preloadDirectML), &self))
+		return;
+	wchar_t buf[2048];
+	DWORD n = GetModuleFileNameW(self, buf, 2048);
+	if (n == 0 || n >= 2048)
+		return;
+	std::wstring path(buf, n);
+	path = path.substr(0, path.find_last_of(L"\\/") + 1) + L"DirectML.dll";
+	HMODULE dml = GetModuleHandleW(L"DirectML.dll");
+	const bool preexisting = dml != nullptr;
+	if (!dml)
+		dml = LoadLibraryExW(path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+	if (!dml) {
+		PM_LOG_WARN("could not load bundled DirectML.dll (error %lu)", GetLastError());
+		return;
+	}
+	n = GetModuleFileNameW(dml, buf, 2048);
+	char utf8[4096] = {};
+	if (n > 0 && n < 2048)
+		WideCharToMultiByte(CP_UTF8, 0, buf, (int)n, utf8, sizeof(utf8) - 1, nullptr, nullptr);
+	PM_LOG_INFO("DirectML.dll in use: %s%s", utf8, preexisting ? " (already loaded by another module)" : "");
+}
+#endif
 } // namespace
 
 ModelManager &modelManager()
@@ -77,6 +118,9 @@ bool obs_module_load(void)
 	log::setMinLevel(g_devMode ? log::Level::Debug : log::Level::Info);
 
 	PM_LOG_INFO("ProMatte %s loading (OBS %s)", PROMATTE_VERSION, obs_get_version_string());
+#ifdef _WIN32
+	preloadDirectML();
+#endif
 	PM_LOG_INFO("system: %s, %u threads, %.1f GB RAM, %s", sysinfo::cpuName().c_str(), sysinfo::logicalCores(),
 		    double(sysinfo::totalPhysicalMemory()) / (1024.0 * 1024 * 1024), sysinfo::osVersion().c_str());
 	for (const auto &g : sysinfo::enumerateGpus())
