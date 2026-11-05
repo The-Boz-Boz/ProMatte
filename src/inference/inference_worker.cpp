@@ -45,23 +45,29 @@ void InferenceWorker::start()
 {
 	if (running_.exchange(true))
 		return;
+	stopping_ = false;
 	setState(WorkerState::Idle);
 	thread_ = std::thread([this] { threadMain(); });
 }
 
 void InferenceWorker::stop()
 {
+	stopping_ = true; // a backend still initialising on the worker is not installed
 	if (!running_.exchange(false)) {
 		if (thread_.joinable())
 			thread_.join();
 		return;
 	}
-	if (backend_)
-		backend_->cancel(); // abort an in-flight Run() so join is fast
+	{
+		// The worker may be replacing backend_ right now; cancel whichever is current.
+		std::lock_guard<std::mutex> lock(backendMutex_);
+		if (backend_)
+			backend_->cancel(); // abort an in-flight Run() so join is fast
+	}
 	cv_.notify_all();
 	if (thread_.joinable())
 		thread_.join();
-	backend_.reset();
+	replaceBackend(nullptr);
 	setState(WorkerState::Stopped);
 }
 
@@ -256,6 +262,10 @@ std::unique_ptr<SegmentationBackend> InferenceWorker::initializeBackend(const Wo
 	}
 	std::string lastError;
 	for (BackendKind k : attempts) {
+		if (stopping_) {
+			error = "worker stopping";
+			return nullptr;
+		}
 		if (!backendAvailable(k)) {
 			lastError = std::string(backendKindName(k)) + " not available";
 			continue;
@@ -263,6 +273,10 @@ std::unique_ptr<SegmentationBackend> InferenceWorker::initializeBackend(const Wo
 		auto b = createBackend(k);
 		std::string err;
 		if (b->initialize(cfg.backend, cfg.model, cfg.modelPath, err)) {
+			if (stopping_) {
+				error = "worker stopping";
+				return nullptr;
+			}
 			if (k != kind)
 				PM_LOG_WARN("backend %s failed (%s); fell back to %s", backendKindName(kind), lastError.c_str(),
 					    backendKindName(k));
@@ -273,6 +287,21 @@ std::unique_ptr<SegmentationBackend> InferenceWorker::initializeBackend(const Wo
 	}
 	error = lastError.empty() ? "no inference backend available" : lastError;
 	return nullptr;
+}
+
+bool InferenceWorker::replaceBackend(std::unique_ptr<SegmentationBackend> next)
+{
+	std::unique_ptr<SegmentationBackend> old;
+	{
+		std::lock_guard<std::mutex> lock(backendMutex_);
+		if (next && stopping_)
+			return false; // `next` is released outside the lock on return
+		old = std::move(backend_);
+		backend_ = std::move(next);
+	}
+	// Session teardown can take a while; never do it while stop() waits on the lock.
+	old.reset();
+	return true;
 }
 
 void InferenceWorker::publishModel(const WorkerConfig &cfg, bool usingFallback)
@@ -308,7 +337,7 @@ bool InferenceWorker::applyConfigLocked(WorkerConfig cfg, bool keepCurrentOnFail
 	if (needBackend) {
 		if (!keepCurrentOnFailure) {
 			// Release the old session first so two models never occupy (V)RAM at once.
-			backend_.reset();
+			replaceBackend(nullptr);
 			publishModel(cfg, false);
 			setState(WorkerState::Initializing);
 		}
@@ -320,7 +349,7 @@ bool InferenceWorker::applyConfigLocked(WorkerConfig cfg, bool keepCurrentOnFail
 					    err.c_str(), config_.model.id.c_str());
 				return false;
 			}
-			backend_.reset();
+			replaceBackend(nullptr);
 			config_ = cfg;
 			publishModel(cfg, false);
 			setState(cfg.modelPath.empty() ? WorkerState::NoModel : WorkerState::Error, err);
@@ -328,7 +357,8 @@ bool InferenceWorker::applyConfigLocked(WorkerConfig cfg, bool keepCurrentOnFail
 			aiW_ = aiH_ = 0;
 			return false;
 		}
-		backend_ = std::move(fresh);
+		if (!replaceBackend(std::move(fresh)))
+			return false; // stopping
 	}
 	config_ = cfg;
 	temporal_.setParams(cfg.temporal);
@@ -412,7 +442,7 @@ void InferenceWorker::threadMain()
 		if (!running_)
 			break;
 		if (doRelease) {
-			backend_.reset();
+			replaceBackend(nullptr);
 			config_.model = ModelDescriptor{};
 			config_.modelPath.clear();
 			aiW_ = aiH_ = 0;
@@ -563,7 +593,7 @@ void InferenceWorker::threadMain()
 		}
 		processOne(work_);
 	}
-	backend_.reset();
+	replaceBackend(nullptr);
 	PM_LOG_DEBUG("inference worker thread exiting");
 }
 
@@ -589,7 +619,7 @@ void InferenceWorker::handleInferenceError(const std::string &error)
 	// rebuild it after a growing pause instead of failing every frame.
 	reinitDelayMs_ = reinitDelayMs_ <= 0 ? 1000.0 : std::min(reinitDelayMs_ * 2.0, kMaxReinitDelayMs);
 	reinitDueMs_ = now + reinitDelayMs_;
-	backend_.reset();
+	replaceBackend(nullptr);
 	aiW_ = aiH_ = 0;
 	PM_LOG_WARN("%d inference errors in a row; backend released, re-initialising in %.0f s", consecutiveErrors_,
 		    reinitDelayMs_ / 1000.0);
@@ -610,7 +640,8 @@ void InferenceWorker::tryReinitialize()
 		setState(WorkerState::Error, "re-initialisation failed: " + err);
 		return;
 	}
-	backend_ = std::move(fresh);
+	if (!replaceBackend(std::move(fresh)))
+		return; // stopping
 	{
 		std::lock_guard<std::mutex> lock(statusMutex_);
 		status_.backend = backend_->capabilities();

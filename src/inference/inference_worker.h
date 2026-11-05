@@ -125,6 +125,9 @@ private:
 	// Creates and initialises a backend for `cfg` without touching backend_.
 	std::unique_ptr<SegmentationBackend> initializeBackend(const WorkerConfig &cfg, std::string &error);
 	void publishModel(const WorkerConfig &cfg, bool usingFallback);
+	// The only way backend_ changes (worker thread, or stop() after the join).
+	// Refuses to install a new backend while the worker is being stopped.
+	bool replaceBackend(std::unique_ptr<SegmentationBackend> next);
 	void handleInferenceError(const std::string &error);
 	void tryReinitialize();
 	void updateAiResolution();
@@ -135,6 +138,7 @@ private:
 	// thread + control
 	std::thread thread_;
 	std::atomic<bool> running_{false};
+	std::atomic<bool> stopping_{false};
 	std::atomic<bool> enabled_{true};
 	mutable std::mutex ctrlMutex_;
 	std::condition_variable cv_;
@@ -165,6 +169,10 @@ private:
 
 	// worker-owned state
 	WorkerConfig config_;
+	// Owned by the worker thread, which may read it without locking. Every
+	// assignment/reset holds backendMutex_, and so does stop() while it calls
+	// cancel() from another thread. Run/initialise never hold it.
+	std::mutex backendMutex_;
 	std::unique_ptr<SegmentationBackend> backend_;
 	std::vector<float> tensor_;
 	std::vector<uint8_t> luma_;
