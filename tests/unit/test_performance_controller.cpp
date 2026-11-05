@@ -133,3 +133,29 @@ TEST_CASE("mode switch applies pending tier")
 	CHECK(t == 0);
 	CHECK_FALSE(pc.pollTierChange(t));
 }
+
+TEST_CASE("fast downgrade waits for the warm-up and ignores settling frames")
+{
+	PerformanceController pc;
+	pc.warmupMs = 300;
+	pc.configure(QualityMode::Auto, 4, 30.0, true);
+	pc.forceTier(2);
+	int t = -1;
+	REQUIRE(pc.pollTierChange(t)); // a tier change restarts the warm-up
+	const double budget = pc.budgetMs();
+	// Settling frames (first runs after a resolution change) never count.
+	for (int i = 0; i < 10; ++i)
+		pc.recordSettlingInference();
+	CHECK(pc.snapshot().framesProcessed == 10);
+	CHECK(pc.snapshot().inferenceMs == 0.0);
+	// 5x over budget, but inside the warm-up: no fast downgrade yet.
+	for (int i = 0; i < 6; ++i)
+		pc.recordInference(budget * 5, 1, 1, budget * 5 + 2);
+	CHECK_FALSE(pc.pollTierChange(t));
+	CHECK(pc.currentTier() == 2);
+	// After the warm-up the fast path reacts on the next sample.
+	std::this_thread::sleep_for(std::chrono::milliseconds(350));
+	pc.recordInference(budget * 5, 1, 1, budget * 5 + 2);
+	CHECK(pc.pollTierChange(t));
+	CHECK(t == 1);
+}

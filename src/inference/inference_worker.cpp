@@ -266,6 +266,7 @@ void InferenceWorker::updateAiResolution()
 		backend_->resetState();
 	temporal_.reset();
 	thumbRefValid_ = false; // the next frame always runs the model
+	settleFrames_ = kSettleFrames;
 	PM_LOG_INFO("AI resolution: %ux%u (tier %d '%s', ratio %.3f) for source %ux%u", w, h, tier_, t.label.c_str(),
 		    t.downsampleRatio, config_.sourceWidth, config_.sourceHeight);
 }
@@ -891,7 +892,12 @@ void InferenceWorker::processOne(FrameBuffer &frame)
 		std::swap(matteSlot_, matteWork_);
 		matteAvailable_ = true;
 	}
-	perf_.recordInference(infMs, preMs, postMs, total.elapsedMs());
+	if (settleFrames_ > 0) {
+		--settleFrames_;
+		perf_.recordSettlingInference();
+	} else {
+		perf_.recordInference(infMs, preMs, postMs, total.elapsedMs());
+	}
 	if (status_.state != WorkerState::Running)
 		setState(WorkerState::Running);
 }

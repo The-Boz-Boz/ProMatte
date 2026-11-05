@@ -209,6 +209,10 @@ private:
 	PerformanceController perf_;
 	double lastProcessedMs_ = -1;
 	int tier_ = 0;
+	// Inferences after an AI resolution change that are not timed for the
+	// performance controller (kSettleFrames, set by updateAiResolution).
+	static constexpr int kSettleFrames = 2;
+	int settleFrames_ = 0;
 
 	// static-scene skip (setMotionSkip)
 	static constexpr uint32_t kThumbW = 64, kThumbH = 36;

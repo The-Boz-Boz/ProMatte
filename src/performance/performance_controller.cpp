@@ -141,6 +141,13 @@ void PerformanceController::recordInference(double inferenceMs, double preMs, do
 	evaluateLocked(now);
 }
 
+void PerformanceController::recordSettlingInference()
+{
+	std::lock_guard<std::mutex> lock(m_);
+	++processed_;
+	aiRate_.tick(Stopwatch::nowMs());
+}
+
 void PerformanceController::recordSubmit(bool overwroteUnread)
 {
 	std::lock_guard<std::mutex> lock(m_);
@@ -248,7 +255,10 @@ void PerformanceController::evaluateLocked(double now)
 	// Fast path: a model that is dramatically too slow (e.g. a heavy matting network
 	// on an entry-level GPU) is stepped down immediately instead of after the normal
 	// hysteresis - one such inference can stall the whole GPU for hundreds of ms.
-	if (inferenceEma_.count() >= 3 && totalEma_.value() > budgetMs_ * 3.0) {
+	// Not during the warm-up after configure()/a tier change: the first runs of a
+	// new session or shape (DirectML compiles kernels lazily) are not
+	// representative.
+	if (now - configuredAt_ >= warmupMs && inferenceEma_.count() >= 3 && totalEma_.value() > budgetMs_ * 3.0) {
 		if (tier_ > 0) {
 			pendingTier_ = tier_ - 1;
 			pendingChange_ = true;

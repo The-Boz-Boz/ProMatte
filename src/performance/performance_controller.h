@@ -43,6 +43,10 @@ public:
 	QualityMode mode() const;
 
 	void recordInference(double inferenceMs, double preMs, double postMs, double totalMs);
+	// A processed frame whose timing must not steer the tiers: the first runs
+	// after an AI resolution change (shape re-planning, allocations). Counted
+	// for the statistics only.
+	void recordSettlingInference();
 	void recordSubmit(bool overwroteUnread);
 	void recordRender(double ms);
 	void recordQueueDepth(int depth);
