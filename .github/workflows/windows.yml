@@ -1,0 +1,70 @@
+name: windows
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  models:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Convert models
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r tools/models/requirements.txt
+          python tools/models/convert_models.py
+          python tools/models/fix_pphumanseg.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: models-win
+          path: models/converted
+          retention-days: 1
+
+  windows:
+    needs: models
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: models-win
+          path: models/converted
+      - name: Dependencies (OBS SDK, ONNX Runtime DirectML, DirectML)
+        shell: pwsh
+        run: ./tools/setup-deps.ps1
+      - name: Configure
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Unit tests
+        shell: pwsh
+        run: |
+          $env:PATH = "$PWD\.deps\onnxruntime\runtimes\win-x64\native;$PWD\.deps\directml\bin\x64-win;$env:PATH"
+          .\build\bin\Release\promatte-unit-tests.exe
+      - name: Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+      - name: Installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          $stage = (Resolve-Path build/stage).Path
+          $ver = if ((Get-Content CMakeLists.txt -Raw) -match 'project\(promatte VERSION ([0-9.]+)') { $Matches[1] } else { '0.0.0' }
+          & $iscc "/DVersion=$ver" "/DStageDir=$stage" "/O$PWD\installer\output" installer\ProMatte.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed $LASTEXITCODE" }
+          Get-ChildItem installer/output | Get-FileHash | Format-Table -AutoSize | Out-String -Width 400
+      - name: Hashes
+        shell: pwsh
+        run: Get-ChildItem build/stage -Recurse -File | Get-FileHash | Select Hash, Path | Format-Table -AutoSize | Out-String -Width 400
+      - uses: actions/upload-artifact@v4
+        with:
+          name: promatte-windows-x64
+          path: |
+            installer/output/*
+            build/stage/**
