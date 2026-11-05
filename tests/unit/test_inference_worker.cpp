@@ -6,6 +6,7 @@
 #include <functional>
 #include <thread>
 
+#include "backends/onnxruntime_backend.h"
 #include "inference/backend_registry.h"
 #include "inference/inference_worker.h"
 #include "models/model_manager.h"
@@ -287,4 +288,22 @@ TEST_CASE("static frames reuse the previous matte without running the model")
 	submitAndWait(160); // identical, but skipping is off
 	CHECK(waitFor([&] { return w.stats().framesProcessed == 3; }, 10000));
 	w.stop();
+}
+
+TEST_CASE("symbolic batch_size dimension is detected before session creation")
+{
+	ModelDescriptor m;
+	std::string path;
+	if (!loadModel(m, path, "rvm_mobilenetv3")) {
+		MESSAGE("RVM model not downloaded; skipping");
+		return;
+	}
+	CHECK(OnnxRuntimeBackend::modelHasSymbolicDim(path, "batch_size"));
+	CHECK(OnnxRuntimeBackend::modelHasSymbolicDim(path, "height"));
+	CHECK_FALSE(OnnxRuntimeBackend::modelHasSymbolicDim(path, "no_such_axis"));
+	CHECK_FALSE(OnnxRuntimeBackend::modelHasSymbolicDim("/definitely/not/here.onnx", "batch_size"));
+	ModelDescriptor m16;
+	std::string p16;
+	if (loadModel(m16, p16, "rvm_mobilenetv3_fp16"))
+		CHECK(OnnxRuntimeBackend::modelHasSymbolicDim(p16, "batch_size"));
 }

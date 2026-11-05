@@ -37,6 +37,9 @@ public:
 	// path and FileVersion once. Returns false when DirectML must not be used
 	// (missing, or older than 1.15). Always true in other builds.
 	static bool prepareDirectML();
+	// True when the ONNX file declares a symbolic dimension `name` (a dim_param
+	// of a tensor shape, e.g. RVM's "batch_size"); readable before a session exists.
+	static bool modelHasSymbolicDim(const std::string &modelPath, const std::string &name);
 
 private:
 	struct IoNames {

@@ -171,6 +171,23 @@ ONNXTensorElementDataType tensorElementType(const Ort::TypeInfo &typeInfo)
 
 } // namespace
 
+// The file is scanned for the protobuf encoding of the dim_param:
+// TensorShapeProto.Dimension.dim_param is field 2, wire type 2 -> 0x12,
+// <length>, <name>.
+bool OnnxRuntimeBackend::modelHasSymbolicDim(const std::string &modelPath, const std::string &name)
+{
+	if (name.empty() || name.size() > 127)
+		return false;
+	std::string bytes;
+	if (!fs::readTextFile(modelPath, bytes))
+		return false;
+	std::string needle;
+	needle.push_back('\x12');
+	needle.push_back(char(name.size()));
+	needle += name;
+	return bytes.find(needle) != std::string::npos;
+}
+
 bool OnnxRuntimeBackend::prepareDirectML()
 {
 #if defined(_WIN32) && defined(PROMATTE_HAVE_DIRECTML)
@@ -421,6 +438,16 @@ bool OnnxRuntimeBackend::initialize(const BackendConfig &config, const ModelDesc
 			caps_.deviceName = sysinfo::cpuName() + " (" + std::to_string(threads) + " threads)";
 			caps_.isGpu = false;
 			break;
+		}
+
+		// RVM runs one frame at a time: pinning the free batch axis lets the
+		// optimiser and the execution provider plan static shapes for it. Only
+		// when the graph really has a dimension of that name.
+		if (model_.family == "rvm" && OnnxRuntimeBackend::modelHasSymbolicDim(modelPath, "batch_size")) {
+			// Through the C API: the C++ wrapper method is missing from older
+			// onnxruntime_cxx_api.h releases.
+			Ort::ThrowOnError(Ort::GetApi().AddFreeDimensionOverrideByName(so, "batch_size", 1));
+			PM_LOG_DEBUG("model '%s': free dimension batch_size pinned to 1", model_.id.c_str());
 		}
 
 #ifdef _WIN32
