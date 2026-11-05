@@ -827,6 +827,7 @@ void InferenceWorker::processOne(FrameBuffer &frame)
 	in.shape = m.inputLayout == TensorLayout::NCHW ? std::vector<int64_t>{1, 3, int64_t(h), int64_t(w)}
 						       : std::vector<int64_t>{1, int64_t(h), int64_t(w), 3};
 	in.resetState = false;
+	in.needForeground = needForeground_.load();
 	std::string err;
 	if (!backend_->processFrame(in, output_, err)) {
 		if (running_)

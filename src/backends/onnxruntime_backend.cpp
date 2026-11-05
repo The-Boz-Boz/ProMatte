@@ -780,7 +780,9 @@ bool OnnxRuntimeBackend::runRecurrent(const InferenceInput &input, InferenceOutp
 		}
 	}
 
-	const bool wantFg = model_.providesForeground && !io_.foreground.empty();
+	// fgr is only fetched when the compositor uses it (decontamination or the
+	// foreground debug view): no binding, no device->CPU copy, no conversion.
+	const bool wantFg = model_.providesForeground && !io_.foreground.empty() && input.needForeground;
 	std::vector<Ort::Value> results;
 	std::vector<std::string> outOrder; // names in result order
 

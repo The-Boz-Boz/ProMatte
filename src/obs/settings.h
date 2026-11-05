@@ -97,6 +97,10 @@ struct FilterSettings {
 	DebugView debugView = DebugView::None;
 	bool overlay = false;
 
+	// The compositor reads the model's foreground colour (RVM fgr) only for
+	// decontamination and the foreground debug view.
+	bool needsModelForeground() const { return decontaminate > 0.001f || debugView == DebugView::Foreground; }
+
 	// Derived parameter sets for the core layers.
 	RefineParams refineParams() const;
 	TemporalParams temporalParams() const;

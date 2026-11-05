@@ -91,6 +91,8 @@ public:
 	// run through the model, as long as the last real inference is younger than
 	// `maxStaleMs`. The previous matte stays on screen. Hot parameter.
 	void setMotionSkip(bool enabled, float threshold, double maxStaleMs);
+	// Whether mattes need the model's foreground colour (RVM fgr). Hot parameter.
+	void setNeedForeground(bool need) { needForeground_ = need; }
 	// When disabled the worker drops incoming frames and idles (no AI cost).
 	void setEnabled(bool enabled);
 	// Release the backend/session (e.g. filter hidden for a long time).
@@ -217,6 +219,7 @@ private:
 	// static-scene skip (setMotionSkip)
 	static constexpr uint32_t kThumbW = 64, kThumbH = 36;
 	static constexpr double kSkipLogIntervalMs = 60000.0;
+	std::atomic<bool> needForeground_{true};
 	std::atomic<bool> skipEnabled_{true};
 	std::atomic<float> skipThreshold_{1.5f};
 	std::atomic<double> skipMaxStaleMs_{250.0};

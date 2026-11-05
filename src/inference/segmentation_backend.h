@@ -37,6 +37,7 @@ struct InferenceInput {
 	uint32_t height = 0;
 	float downsampleRatio = 1.0f;  // for recurrent RVM-style models
 	bool resetState = false;       // discontinuity: reset recurrent state before this frame
+	bool needForeground = true;    // request the model's foreground colour (RVM fgr) when it has one
 };
 
 struct InferenceOutput {

@@ -245,6 +245,18 @@ TEST_CASE("RVM FP16 and FP32 exports agree on the CPU backend")
 	REQUIRE(o16b.alpha.size() == o16.alpha.size());
 	for (size_t i = 0; i < o16.alpha.size(); i += 97)
 		CHECK(o16b.alpha[i] == doctest::Approx(o16.alpha[i]).epsilon(1e-3));
+
+	// Without a consumer for it, fgr is not requested; alpha is unaffected.
+	InferenceInput noFg = in;
+	noFg.needForeground = false;
+	InferenceOutput o32n;
+	b32->resetState();
+	for (int i = 0; i < 3; ++i)
+		REQUIRE_MESSAGE(b32->processFrame(noFg, o32n, err), err);
+	CHECK(o32n.foreground.empty());
+	REQUIRE(o32n.alpha.size() == o32.alpha.size());
+	for (size_t i = 0; i < o32.alpha.size(); i += 97)
+		CHECK(o32n.alpha[i] == doctest::Approx(o32.alpha[i]).epsilon(1e-4));
 }
 
 TEST_CASE("static frames reuse the previous matte without running the model")
