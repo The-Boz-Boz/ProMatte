@@ -164,6 +164,8 @@ bool InferenceWorker::wantsFrame() const
 {
 	if (!enabled_.load() || aiW_.load() == 0)
 		return false;
+	if (Stopwatch::nowMs() < nextDueMs_.load())
+		return false; // maxAiFps throttle: no readback for a frame that would wait
 	std::lock_guard<std::mutex> lock(frameMutex_);
 	return !frameAvailable_;
 }
@@ -586,11 +588,7 @@ void InferenceWorker::threadMain()
 		perf_.recordQueueDepth(0);
 		if (!got)
 			continue;
-		if (config_.minIntervalMs > 0 && lastProcessedMs_ >= 0) {
-			double since = Stopwatch::nowMs() - lastProcessedMs_;
-			if (since < config_.minIntervalMs)
-				continue; // throttle: skip this frame
-		}
+		// Throttling happens in wantsFrame(): a frame that was read back is processed.
 		processOne(work_);
 	}
 	replaceBackend(nullptr);
@@ -679,6 +677,8 @@ void InferenceWorker::processOne(FrameBuffer &frame)
 	if (frame.empty())
 		return;
 	Stopwatch total;
+	// The throttle interval runs from the start of this frame.
+	nextDueMs_ = config_.minIntervalMs > 0 ? Stopwatch::nowMs() + config_.minIntervalMs : 0.0;
 	const ModelDescriptor &m = config_.model;
 
 	// Fixed-input models must receive exactly their input size; if the render

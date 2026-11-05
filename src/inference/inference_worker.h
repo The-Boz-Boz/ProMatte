@@ -88,9 +88,10 @@ public:
 	// --- render-thread side -------------------------------------------------
 	// AI resolution the render thread should downscale to right now.
 	void desiredResolution(uint32_t &w, uint32_t &h) const;
-	// True when the worker has consumed the previous frame and is ready for a new
-	// one. The render thread uses this to avoid a GPU readback (a sync point that
-	// can queue behind long inference dispatches) for frames nobody will process.
+	// True when the worker has consumed the previous frame, is ready for a new one
+	// and the maxAiFps throttle allows starting it. The render thread uses this to
+	// avoid a GPU readback (a sync point that can queue behind long inference
+	// dispatches) for frames nobody will process.
 	bool wantsFrame() const;
 	// Hands a frame to the worker; `frame` receives the previous slot buffer for reuse.
 	void submitFrame(FrameBuffer &frame);
@@ -197,6 +198,9 @@ private:
 	double reinitDelayMs_ = 0;
 	double reinitDueMs_ = -1; // < 0: no re-initialisation scheduled
 	std::atomic<uint32_t> aiW_{0}, aiH_{0};
+	// Throttle (minIntervalMs): earliest Stopwatch::nowMs() at which the next frame
+	// may start, measured from the start of the previous one. 0 = no limit.
+	std::atomic<double> nextDueMs_{0.0};
 	std::atomic<float> ratio_{1.f};
 
 	// status
