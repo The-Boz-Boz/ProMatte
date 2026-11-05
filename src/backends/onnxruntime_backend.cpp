@@ -6,6 +6,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <winver.h>
 #include <d3d12.h>
 #include <dxgi1_4.h>
 #include <wrl/client.h>
@@ -41,7 +42,115 @@ void ORT_API_CALL ortLogCallback(void *, OrtLoggingLevel severity, const char *,
 	}
 }
 
+#if defined(_WIN32) && defined(PROMATTE_HAVE_DIRECTML)
+// Any object of this module: its address identifies the binary this code is
+// linked into (the plugin DLL, or the test / benchmark executable).
+const int kModuleAnchor = 0;
+
+std::wstring modulePath(HMODULE module)
+{
+	std::vector<wchar_t> buf(32768);
+	const DWORD n = GetModuleFileNameW(module, buf.data(), DWORD(buf.size()));
+	if (n == 0 || n >= buf.size())
+		return {};
+	return std::wstring(buf.data(), n);
+}
+
+bool fileVersion(const std::wstring &path, unsigned (&v)[4])
+{
+	DWORD ignored = 0;
+	const DWORD size = GetFileVersionInfoSizeW(path.c_str(), &ignored);
+	if (size == 0)
+		return false;
+	std::vector<unsigned char> data(size);
+	if (!GetFileVersionInfoW(path.c_str(), 0, size, data.data()))
+		return false;
+	VS_FIXEDFILEINFO *info = nullptr;
+	UINT len = 0;
+	if (!VerQueryValueW(data.data(), L"\\", reinterpret_cast<LPVOID *>(&info), &len) || !info ||
+	    len < sizeof(VS_FIXEDFILEINFO))
+		return false;
+	v[0] = HIWORD(info->dwFileVersionMS);
+	v[1] = LOWORD(info->dwFileVersionMS);
+	v[2] = HIWORD(info->dwFileVersionLS);
+	v[3] = LOWORD(info->dwFileVersionLS);
+	return true;
+}
+
+struct DirectMLModule {
+	HMODULE module = nullptr;
+	bool usable = false;
+};
+
+DirectMLModule loadDirectML()
+{
+	DirectMLModule r;
+	// Whatever copy is already in the process is the one onnxruntime.dll will bind
+	// to as well; loading a second one by full path would not change that.
+	r.module = GetModuleHandleW(L"DirectML.dll");
+	if (!r.module) {
+		HMODULE self = nullptr;
+		if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+					reinterpret_cast<LPCWSTR>(&kModuleAnchor), &self)) {
+			PM_LOG_WARN("DirectML: cannot locate own module (error %lu); DirectML backend disabled",
+				    static_cast<unsigned long>(GetLastError()));
+			return r;
+		}
+		std::wstring path = modulePath(self);
+		const size_t slash = path.find_last_of(L"\\/");
+		if (slash == std::wstring::npos) {
+			PM_LOG_WARN("DirectML: cannot resolve own module path; DirectML backend disabled");
+			return r;
+		}
+		path = path.substr(0, slash + 1) + L"DirectML.dll";
+		r.module = LoadLibraryExW(path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+		if (!r.module) {
+			const unsigned long code = GetLastError();
+			PM_LOG_WARN("DirectML: %s could not be loaded (error %lu); DirectML backend disabled",
+				    fs::fromWide(path).c_str(), code);
+			return r;
+		}
+	}
+	const std::string path = fs::fromWide(modulePath(r.module));
+	unsigned v[4] = {};
+	if (!fileVersion(modulePath(r.module), v)) {
+		PM_LOG_WARN("DirectML.dll: %s (FileVersion unavailable; assuming it is usable)", path.c_str());
+		r.usable = true;
+		return r;
+	}
+	PM_LOG_INFO("DirectML.dll: %s (FileVersion %u.%u.%u.%u)", path.c_str(), v[0], v[1], v[2], v[3]);
+	// The ONNX Runtime 1.24 DML provider needs the DirectML 1.15 redistributable.
+	if (v[0] < 1 || (v[0] == 1 && v[1] < 15)) {
+		PM_LOG_WARN("DirectML.dll %u.%u is older than 1.15, which ONNX Runtime %s needs; DirectML backend "
+			    "disabled (CPU is used instead)",
+			    v[0], v[1], OrtGetApiBase()->GetVersionString());
+		return r;
+	}
+	if (v[0] >= 10)
+		PM_LOG_WARN("DirectML.dll %s looks like the Windows inbox copy (version %u.%u), not the "
+			    "redistributable shipped with ProMatte; DirectML may fail",
+			    path.c_str(), v[0], v[1]);
+	r.usable = true;
+	return r;
+}
+
+const DirectMLModule &directML()
+{
+	static const DirectMLModule instance = loadDirectML();
+	return instance;
+}
+#endif
+
 } // namespace
+
+bool OnnxRuntimeBackend::prepareDirectML()
+{
+#if defined(_WIN32) && defined(PROMATTE_HAVE_DIRECTML)
+	return directML().usable;
+#else
+	return true;
+#endif
+}
 
 const char *backendKindName(BackendKind kind)
 {
@@ -117,10 +226,11 @@ bool OnnxRuntimeBackend::appendDirectMLProvider(Ort::SessionOptions &so, int ada
 		qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
 		if (FAILED(dev->d3d12->CreateCommandQueue(&qd, IID_PPV_ARGS(&dev->queue))))
 			throw std::runtime_error("CreateCommandQueue failed");
-		// DirectML.dll is already loaded by onnxruntime.dll; resolve DMLCreateDevice from it.
-		HMODULE dmlLib = LoadLibraryW(L"DirectML.dll");
+		// Resolve DMLCreateDevice from the DirectML.dll prepareDirectML() vetted
+		// (the same module onnxruntime.dll binds to), never a fresh search.
+		HMODULE dmlLib = directML().usable ? directML().module : nullptr;
 		if (!dmlLib)
-			throw std::runtime_error("DirectML.dll not found");
+			throw std::runtime_error("DirectML.dll unavailable");
 		using CreateFn = HRESULT(WINAPI *)(ID3D12Device *, DML_CREATE_DEVICE_FLAGS, REFIID, void **);
 		auto createFn = reinterpret_cast<CreateFn>(GetProcAddress(dmlLib, "DMLCreateDevice"));
 		if (!createFn)
@@ -206,6 +316,10 @@ bool OnnxRuntimeBackend::initialize(const BackendConfig &config, const ModelDesc
 		switch (kind_) {
 		case BackendKind::DirectML: {
 #if defined(PROMATTE_HAVE_DIRECTML) && defined(_WIN32)
+			if (!prepareDirectML()) {
+				error = "DirectML.dll is missing or older than 1.15";
+				return false;
+			}
 			so.DisableMemPattern();
 			so.SetExecutionMode(ORT_SEQUENTIAL);
 			so.SetIntraOpNumThreads(threads);

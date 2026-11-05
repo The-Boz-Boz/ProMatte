@@ -3,14 +3,21 @@
 #include <cstdlib>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include <obs-module.h>
 #include <util/platform.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+#include "backends/onnxruntime_backend.h"
 #include "inference/backend_registry.h"
 #include "models/model_manager.h"
 #include "performance/capability_store.h"
 #include "obs/filter.h"
+#include "utils/file_utils.h"
 #include "utils/logging.h"
 #include "utils/system_info.h"
 
@@ -28,6 +35,24 @@ void obsLogSink(log::Level level, const char *message)
 {
 	int lvl = level == log::Level::Error ? LOG_ERROR : level == log::Level::Warning ? LOG_WARNING : level == log::Level::Info ? LOG_INFO : LOG_DEBUG;
 	blog(lvl, "[promatte] %s", message);
+}
+
+// Full path of the onnxruntime.dll this process actually uses (another plugin may
+// have loaded a different copy before us).
+std::string loadedOrtPath()
+{
+#ifdef _WIN32
+	HMODULE ort = GetModuleHandleW(L"onnxruntime.dll");
+	if (!ort)
+		return "onnxruntime.dll (not found among loaded modules)";
+	std::vector<wchar_t> buf(32768);
+	const DWORD n = GetModuleFileNameW(ort, buf.data(), DWORD(buf.size()));
+	if (n == 0 || n >= buf.size())
+		return "onnxruntime.dll (path unavailable)";
+	return fs::fromWide(std::wstring(buf.data(), n));
+#else
+	return "the shared onnxruntime library";
+#endif
 }
 } // namespace
 
@@ -84,6 +109,24 @@ bool obs_module_load(void)
 			    sysinfo::vendorName(g.vendorId), double(g.dedicatedVideoMemory) / (1024.0 * 1024),
 			    g.isSoftware ? " [software]" : "");
 
+	// The core is built with ORT_API_MANUAL_INIT, so nothing has touched ONNX
+	// Runtime yet. If an older onnxruntime.dll was loaded into OBS first (another
+	// plugin), it cannot serve our API version: GetApi returns null and the first
+	// Ort:: call would crash OBS. Stay loaded but inactive and say why.
+	const OrtApiBase *ortBase = OrtGetApiBase();
+	const OrtApi *ortApi = ortBase ? ortBase->GetApi(ORT_API_VERSION) : nullptr;
+	const std::string ortPath = loadedOrtPath();
+	if (!ortApi) {
+		PM_LOG_ERROR("ONNX Runtime %s loaded from %s does not provide API version %d, which ProMatte needs. "
+			     "Another plugin most likely loaded an older onnxruntime.dll first. The ProMatte filter is "
+			     "NOT available in this session.",
+			     ortBase ? ortBase->GetVersionString() : "(unknown version)", ortPath.c_str(), ORT_API_VERSION);
+		return true;
+	}
+	Ort::InitApi(ortApi);
+	PM_LOG_INFO("ONNX Runtime %s (API %d) loaded from %s", ortBase->GetVersionString(), ORT_API_VERSION,
+		    ortPath.c_str());
+
 	std::string bundled, user;
 	moduleDataPath("models", bundled);
 	char *cfg = obs_module_config_path("models");
@@ -128,6 +171,9 @@ bool obs_module_load(void)
 		return true;
 	}
 
+	// Load and check DirectML.dll before anything creates a DML session, so
+	// onnxruntime.dll binds to this copy rather than whatever the search path finds.
+	OnnxRuntimeBackend::prepareDirectML();
 	// Probe backends once at load so the first filter starts quickly.
 	enumerateBackends();
 	registerFilter();

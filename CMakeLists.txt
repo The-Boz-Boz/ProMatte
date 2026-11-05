@@ -44,14 +44,20 @@ add_library(promatte-core STATIC
 )
 target_include_directories(promatte-core PUBLIC src)
 target_link_libraries(promatte-core PUBLIC promatte::onnxruntime promatte::json)
+# ORT_API_MANUAL_INIT: no Ort:: call may run before obs_module_load (or a test /
+# tool main) has checked that the onnxruntime.dll actually loaded into the
+# process serves our API version and called Ort::InitApi(). PUBLIC so every
+# translation unit that sees onnxruntime_cxx_api.h agrees on it.
 target_compile_definitions(promatte-core PUBLIC
     PROMATTE_VERSION="${PROJECT_VERSION}"
+    ORT_API_MANUAL_INIT
     $<$<BOOL:${PROMATTE_ENABLE_DIRECTML}>:PROMATTE_HAVE_DIRECTML=1>
     $<$<BOOL:${WIN32}>:NOMINMAX>
     $<$<BOOL:${WIN32}>:WIN32_LEAN_AND_MEAN>)
 promatte_set_warnings(promatte-core)
 if(WIN32)
-    target_link_libraries(promatte-core PUBLIC dxgi d3d12 winhttp)
+    # version: GetFileVersionInfoW for the DirectML.dll version check
+    target_link_libraries(promatte-core PUBLIC dxgi d3d12 winhttp version)
     if(DIRECTML_INCLUDE_DIR)
         target_include_directories(promatte-core PUBLIC "${DIRECTML_INCLUDE_DIR}")
     endif()

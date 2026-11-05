@@ -31,6 +31,12 @@ public:
 	// Shared process-wide environment (thread-safe, created on first use).
 	static Ort::Env &env();
 	static std::vector<std::string> availableProviders();
+	// Windows DirectML builds: makes sure a DirectML.dll is loaded before ONNX
+	// Runtime needs it - the copy already in the process if there is one,
+	// otherwise the one next to this module (never a System32 search). Logs its
+	// path and FileVersion once. Returns false when DirectML must not be used
+	// (missing, or older than 1.15). Always true in other builds.
+	static bool prepareDirectML();
 
 private:
 	struct IoNames {

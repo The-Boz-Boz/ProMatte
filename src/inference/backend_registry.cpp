@@ -43,6 +43,10 @@ std::vector<BackendCapabilities> probe()
 	add(BackendKind::TensorRT, "TensorrtExecutionProvider", true, firstGpu);
 	add(BackendKind::CUDA, "CUDAExecutionProvider", true, firstGpu);
 	add(BackendKind::DirectML, "DmlExecutionProvider", true, firstGpu);
+	// Missing or too old DirectML.dll: the provider exists in onnxruntime.dll but
+	// must not be used.
+	if (out.back().available && !OnnxRuntimeBackend::prepareDirectML())
+		out.back().available = false;
 	add(BackendKind::CoreML, "CoreMLExecutionProvider", true, "Apple");
 	add(BackendKind::OpenVINO, "OpenVINOExecutionProvider", true, firstGpu);
 	add(BackendKind::CPU, "CPUExecutionProvider", false, sysinfo::cpuName());

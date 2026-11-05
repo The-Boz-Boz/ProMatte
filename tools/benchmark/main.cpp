@@ -18,6 +18,7 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
+#include <onnxruntime_cxx_api.h>
 
 #include "image_io.h"
 #include "inference/backend_registry.h"
@@ -310,6 +311,14 @@ int main(int argc, char **argv)
 	if (!parseArgs(argc, argv, a))
 		return 2;
 	log::setMinLevel(a.verbose ? log::Level::Debug : log::Level::Warning);
+	// promatte-core is built with ORT_API_MANUAL_INIT (see CMakeLists.txt).
+	const OrtApi *ortApi = OrtGetApiBase()->GetApi(ORT_API_VERSION);
+	if (!ortApi) {
+		std::fprintf(stderr, "ONNX Runtime %s does not provide API version %d\n",
+			     OrtGetApiBase()->GetVersionString(), ORT_API_VERSION);
+		return 1;
+	}
+	Ort::InitApi(ortApi);
 
 	ModelManager manager(a.modelsDir, a.modelsDir);
 	std::string err;
