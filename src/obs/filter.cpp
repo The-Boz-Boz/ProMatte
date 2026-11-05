@@ -207,6 +207,7 @@ void FilterContext::configureWorker(const std::string &modelOverride)
 	cfg.minIntervalMs = s.maxAiFps > 0 ? 1000.0 / double(s.maxAiFps) : 0.0;
 	worker->setMotionSkip(s.motionSkip, s.motionSkipParams(), double(s.motionSkipMaxStaleMs));
 	worker->setNeedForeground(s.needsModelForeground());
+	worker->setSyncMatte(s.syncMatte);
 	worker->setConfig(cfg);
 	edgeHistoryReset = true; // a new matte stream: do not blend with the old one
 	PM_LOG_INFO("filter '%s': backend=%s model=%s quality=%s", obs_source_get_name(source), configuredBackend.c_str(),
@@ -222,6 +223,7 @@ void FilterContext::applyTuning()
 	worker->setQualityMode(settings.quality, settings.manualTier);
 	worker->setMotionSkip(settings.motionSkip, settings.motionSkipParams(), double(settings.motionSkipMaxStaleMs));
 	worker->setNeedForeground(settings.needsModelForeground());
+	worker->setSyncMatte(settings.syncMatte);
 }
 
 namespace {

@@ -400,3 +400,11 @@ TEST_CASE("symbolic batch_size dimension is detected before session creation")
 	if (loadModel(m16, p16, "rvm_mobilenetv3_fp16"))
 		CHECK(OnnxRuntimeBackend::modelHasSymbolicDim(p16, "batch_size"));
 }
+
+TEST_CASE("worker thread priority: normal only for the synchronous matte on a GPU backend")
+{
+	CHECK(InferenceWorker::threadPriorityNormal(true, true));
+	CHECK_FALSE(InferenceWorker::threadPriorityNormal(true, false));  // CPU backend
+	CHECK_FALSE(InferenceWorker::threadPriorityNormal(false, true));  // async mode
+	CHECK_FALSE(InferenceWorker::threadPriorityNormal(false, false));
+}

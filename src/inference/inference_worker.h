@@ -107,6 +107,14 @@ public:
 	void setMotionSkip(bool enabled, const MotionSkipParams &params, double maxStaleMs);
 	// Whether mattes need the model's foreground colour (RVM fgr). Hot parameter.
 	void setNeedForeground(bool need) { needForeground_ = need; }
+	// Whether the render thread waits for each matte (synchronous mode). Only
+	// affects the worker thread priority (threadPriorityNormal). Hot parameter.
+	void setSyncMatte(bool sync) { syncMatte_ = sync; }
+	// Worker thread priority policy: normal while OBS' graphics thread waits for
+	// this thread (synchronous matte) and the work runs on a GPU, so the CPU side
+	// of a dispatch is not queued behind other normal-priority threads; below
+	// normal otherwise, so CPU inference cannot starve the compositor/encoders.
+	static bool threadPriorityNormal(bool syncMatte, bool gpuBackend) { return syncMatte && gpuBackend; }
 	// When disabled the worker drops incoming frames and idles (no AI cost).
 	void setEnabled(bool enabled);
 	// Release the backend/session (e.g. filter hidden for a long time).
@@ -152,6 +160,9 @@ public:
 
 private:
 	void threadMain();
+	// Applies threadPriorityNormal() for the current mode and backend (worker
+	// thread; a no-op when nothing changed and on non-Windows platforms).
+	void updateThreadPriority();
 	// keepCurrentOnFailure: used for automatic model switches - when the new model
 	// cannot be initialised, the current model and backend stay in service.
 	bool applyConfigLocked(WorkerConfig cfg, bool keepCurrentOnFailure = false);
@@ -252,6 +263,8 @@ private:
 	static constexpr uint32_t kThumbW = 64, kThumbH = 36;
 	static constexpr double kSkipLogIntervalMs = 60000.0;
 	std::atomic<bool> needForeground_{true};
+	std::atomic<bool> syncMatte_{false};
+	int threadPriorityNormal_ = -1; // last applied policy: -1 unknown, 0 below normal, 1 normal
 	std::atomic<bool> skipEnabled_{true};
 	std::atomic<float> skipCellDelta_{MotionSkipParams{}.cellDelta};
 	std::atomic<int> skipMinCells_{MotionSkipParams{}.minChangedCells};
