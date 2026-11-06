@@ -52,6 +52,7 @@ constexpr const char *Decontaminate = "edge_decontaminate";
 constexpr const char *HaloRemoval = "edge_halo";
 constexpr const char *RemoveBlobs = "edge_remove_blobs";
 constexpr const char *FillHoles = "edge_fill_holes";
+constexpr const char *SoftCurveAll = "edge_soft_curve_all";
 constexpr const char *UpsampleQuality = "edge_upsample_quality";
 constexpr const char *Stability = "temporal_stability";
 constexpr const char *MotionResponse = "temporal_motion";
@@ -100,6 +101,7 @@ struct FilterSettings {
 	float haloRemoval = 0.3f;   // 0..1
 	bool removeBlobs = true;
 	bool fillHoles = true;
+	bool softCurveAll = false;
 	int upsampleQuality = 1; // 0 = 3x3 JBU, 1 = 5x5 JBU
 
 	float stability = 0.6f;

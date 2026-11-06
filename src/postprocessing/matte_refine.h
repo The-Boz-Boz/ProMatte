@@ -28,6 +28,10 @@ struct RefineParams {
 	bool alphaMatting = false;
 	float matteLo = 0.04f; // 0.02..0.15, from the separation slider
 	float matteHi = 0.96f;
+	// User override: treat any model's output as an alpha matte (soft tails only).
+	// Experimental for segmentation models (PP-HumanSeg, MediaPipe) - softer edges,
+	// no real hair alpha.
+	bool forceSoftCurve = false;
 };
 
 constexpr float kMattingHoleKeepAlpha = 0.2f;

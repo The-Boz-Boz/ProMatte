@@ -147,6 +147,7 @@ void settingsDefaults(obs_data_t *d)
 	obs_data_set_default_double(d, keys::HaloRemoval, 0.3);
 	obs_data_set_default_bool(d, keys::RemoveBlobs, true);
 	obs_data_set_default_bool(d, keys::FillHoles, true);
+	obs_data_set_default_bool(d, keys::SoftCurveAll, false);
 	obs_data_set_default_int(d, keys::UpsampleQuality, 1);
 	obs_data_set_default_double(d, keys::Stability, 0.6);
 	obs_data_set_default_double(d, keys::MotionResponse, 0.6);
@@ -198,6 +199,7 @@ FilterSettings settingsLoad(obs_data_t *d)
 	s.haloRemoval = clamp01(obs_data_get_double(d, keys::HaloRemoval));
 	s.removeBlobs = obs_data_get_bool(d, keys::RemoveBlobs);
 	s.fillHoles = obs_data_get_bool(d, keys::FillHoles);
+	s.softCurveAll = obs_data_get_bool(d, keys::SoftCurveAll);
 	s.upsampleQuality = int(std::clamp<long long>(obs_data_get_int(d, keys::UpsampleQuality), 0, 1));
 	s.stability = clamp01(obs_data_get_double(d, keys::Stability));
 	s.motionResponse = clamp01(obs_data_get_double(d, keys::MotionResponse));
@@ -227,6 +229,7 @@ RefineParams FilterSettings::refineParams() const
 	p.matteHi = 0.96f;
 	p.minComponentArea = removeBlobs ? 0.004f : 0.f;
 	p.maxHoleArea = fillHoles ? 0.002f : 0.f;
+	p.forceSoftCurve = softCurveAll;
 	return p;
 }
 

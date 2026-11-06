@@ -357,6 +357,7 @@ obs_properties_t *buildProperties(void *data)
 	slider(e, keys::HaloRemoval, "HaloRemoval", 0.0, 1.0);
 	obs_properties_add_bool(e, keys::RemoveBlobs, T("RemoveBlobs"));
 	obs_properties_add_bool(e, keys::FillHoles, T("FillHoles"));
+	obs_properties_add_bool(e, keys::SoftCurveAll, T("SoftCurveAll"));
 	obs_property_t *uq = obs_properties_add_list(e, keys::UpsampleQuality, T("UpsampleQuality"), OBS_COMBO_TYPE_LIST,
 						     OBS_COMBO_FORMAT_INT);
 	obs_property_list_add_int(uq, T("UpsampleQuality.Fast"), 0);
