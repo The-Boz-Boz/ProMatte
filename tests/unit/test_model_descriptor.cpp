@@ -169,7 +169,7 @@ TEST_CASE("RVM tiers follow the RVM inference guide for both precisions")
 		float ratio;
 	};
 	const Expected expected[] = {{"Performance", 640, 352, 0.4f},
-				     {"Balanced", 896, 512, 0.375f},
+				     {"Balanced", 768, 448, 0.375f},
 				     {"Quality", 1024, 576, 0.375f},
 				     {"Ultra", 1280, 704, 0.375f}};
 	int seen = 0;
